@@ -18,7 +18,7 @@ import (
 const Name = "pacproxy"
 
 // Version of the app
-const Version = "2.0.6"
+const Version = "2.0.7"
 
 // About the app
 const About = "A no-frills local HTTP proxy server powered by a proxy auto-config (PAC) file"
