@@ -17,6 +17,8 @@ Usage:
         PAC file name, url or javascript to use (required)
   -l string
         Interface and port to listen on (default "127.0.0.1:8080")
+  -r string
+        Resolve the proxies for the provided url to STDOUT and exit
   -v    send verbose output to STDERR
 ```
 
@@ -27,6 +29,10 @@ pacproxy -c 'function FindProxyForURL(url, host){ console.log("hello pac world!"
 export http_proxy="127.0.0.1:8080"
 export https_proxy="127.0.0.1:8080"
 curl -I "http://www.example.com"
+```
+
+```bash
+pacproxy -c 'function FindProxyForURL(url, host){ return "PROXY random.example.com:8080"; }' -r "http://www.example.com"
 ```
 
 ## License

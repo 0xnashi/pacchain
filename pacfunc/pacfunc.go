@@ -72,6 +72,9 @@ func (s StaticNower) Now() time.Time {
 // ConvertAddr converts an IPv4 dotted decimal IP address or an IPv6 IP address to an integer
 func ConvertAddr(ipaddr string) uint32 {
 	ip := net.ParseIP(ipaddr)
+	if ip == nil {
+		return 0
+	}
 	if len(ip) == 16 {
 		return binary.BigEndian.Uint32(ip[12:16])
 	}
@@ -108,11 +111,11 @@ func IsInNet(host, netip, netmask string) bool {
 	if err != nil {
 		return false
 	}
-	net := net.IPNet{
+	network := net.IPNet{
 		IP:   net.ParseIP(netip),
 		Mask: net.IPMask(net.ParseIP(netmask)),
 	}
-	return net.Contains(address.IP)
+	return network.Contains(address.IP)
 }
 
 // MyIPAddress returns the IP address of the host machine.
@@ -138,7 +141,7 @@ func DNSResolve(host string) string {
 // Useful when applying exceptions for internal websites, e.g. may not require
 // resolution of a hostname to IP address to determine if local.
 func IsPlainHostName(host string) bool {
-	return strings.Index(host, ".") == -1
+	return !strings.Contains(host, ".")
 }
 
 // LocalHostOrDomainIs evaluates hostname and only returns true if exact
@@ -452,7 +455,6 @@ func TimeRange(args []string) bool {
 			date2.Nanosecond(),
 			date2.Location(),
 		)
-		break
 	default:
 		return false
 	}

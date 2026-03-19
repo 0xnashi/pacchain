@@ -2,10 +2,11 @@ package pac
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -33,7 +34,7 @@ func SmartLoader(thing string) Loader {
 func FileLoader(file string) Loader {
 	return func() (string, error) {
 		log.Printf("loading pac from file %q", file)
-		buf, err := ioutil.ReadFile(file)
+		buf, err := os.ReadFile(file)
 		if err != nil {
 			return "", err
 		}
@@ -49,7 +50,7 @@ func HTTPLoader(u *url.URL) Loader {
 			return "", err
 		}
 		defer res.Body.Close()
-		pac, err := ioutil.ReadAll(res.Body)
+		pac, err := io.ReadAll(res.Body)
 		if err != nil {
 			return "", err
 		}

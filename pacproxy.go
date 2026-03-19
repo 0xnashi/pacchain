@@ -3,9 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -26,15 +27,17 @@ const About = "A no-frills local HTTP proxy server powered by a proxy auto-confi
 const Repo = "https://github.com/williambailey/pacproxy"
 
 var (
-	fPac     string
-	fListen  string
-	fVerbose bool
+	fPac        string
+	fListen     string
+	fVerbose    bool
+	fResolveURL string
 )
 
 func init() {
 	flag.StringVar(&fPac, "c", "", "PAC file name, url or javascript to use (required)")
 	flag.StringVar(&fListen, "l", "127.0.0.1:8080", "Interface and port to listen on")
 	flag.BoolVar(&fVerbose, "v", false, "send verbose output to STDERR")
+	flag.StringVar(&fResolveURL, "r", "", "Resolve the proxies for the provided url to STDOUT and exit")
 }
 
 func main() {
@@ -60,7 +63,7 @@ func main() {
 	if fVerbose {
 		log.SetOutput(os.Stderr)
 	} else {
-		log.SetOutput(ioutil.Discard)
+		log.SetOutput(io.Discard)
 	}
 	log.SetPrefix("")
 	log.SetFlags(log.Ldate | log.Lmicroseconds | log.Lshortfile | log.LUTC)
@@ -76,6 +79,37 @@ func main() {
 
 	initSignalNotify(otto)
 
+	if fResolveURL != "" {
+		do_resolve(otto)
+		return
+	}
+	listen(otto)
+}
+
+func exitWithUsage(message string) {
+	os.Stderr.WriteString(message)
+	os.Stderr.WriteString("\n")
+	flag.Usage()
+	os.Exit(2) // the same exit code flag.Parse uses
+}
+
+func do_resolve(otto *pac.OttoEngine) {
+	u, err := url.Parse(fResolveURL)
+	if err != nil {
+		log.Printf("Unable to parse resolve URL %q: %s", fResolveURL, err)
+		os.Exit(1)
+	}
+	proxies, err := otto.FindProxyForURL(u)
+	if err != nil {
+		log.Printf("Error while trying to find proxy for URL %q: %s", fResolveURL, err)
+		os.Exit(1)
+	}
+	for i := 0; i < len(proxies); i++ {
+		fmt.Println(proxies[i])
+	}
+}
+
+func listen(otto *pac.OttoEngine) {
 	srv := &http.Server{
 		Addr:              fListen,
 		ReadHeaderTimeout: 2 * time.Second,
@@ -90,11 +124,4 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil {
 		log.Panic(err)
 	}
-}
-
-func exitWithUsage(message string) {
-	os.Stderr.WriteString(message)
-	os.Stderr.WriteString("\n")
-	flag.Usage()
-	os.Exit(2) // the same exit code flag.Parse uses
 }

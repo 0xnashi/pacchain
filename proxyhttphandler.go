@@ -43,7 +43,7 @@ func newProxyHTTPHandler(
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		Proxy:                 nil,
-		Dial:                  dialer.Dial,
+		DialContext:           dialer.DialContext,
 	}
 	handler := &proxyHTTPHandler{
 		proxyFinder:   proxyFinder,

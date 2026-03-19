@@ -16,6 +16,7 @@ func TestConvertAddr(t *testing.T) {
 	assertTrue("10.56.23.193", 171448257)
 	assertTrue("0:0:0:0:0:0:7f00:1", 2130706433)
 	assertTrue("2000:4A2B::1f3F", 7999)
+	assertTrue("this is not an ip", 0)
 }
 
 func TestDNSDomainIs(t *testing.T) {
