@@ -99,7 +99,7 @@ func TestOttoWithNonFindProxyForURLFunction(t *testing.T) {
 		"FindProxyForURL = 1234",
 		"http://www.example.com/page.html",
 		[]Proxy{},
-		"TypeError: 'FindProxyForURL' is not a function",
+		"TypeError: \"FindProxyForURL\" is not a function",
 	)
 }
 
