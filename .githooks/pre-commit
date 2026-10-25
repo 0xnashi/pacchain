@@ -1,0 +1,35 @@
+#!/bin/sh
+# pacchain pre-commit guard.
+#
+# Blocks the commit when:
+#   1. a PAC/WPAD file outside examples/ is staged (even via `git add -f`)
+#   2. any staged file contains a keyword from .denylist
+#
+# Bypass (only if you are sure): git commit --no-verify
+
+set -u
+. "$(dirname "$0")/_denylist.sh"
+fail=0
+
+# 1. PAC / WPAD files outside examples/
+pac_files=$(git diff --cached --name-only --diff-filter=ACMR |
+	grep -iE '\.(pac|dat)$' | grep -v '^examples/' || true)
+if [ -n "$pac_files" ]; then
+	echo "[-] pre-commit: PAC files may only live under examples/:" >&2
+	echo "$pac_files" | sed 's/^/      /' >&2
+	fail=1
+fi
+
+# 2. Denylisted keywords in the staged tree (file contents and file names)
+if [ -n "$DENYLIST_PATTERNS" ]; then
+	content_hits=$(git grep --cached -n -I -i -F -f "$DENYLIST_PATTERNS" -- . ':!.denylist.example' || true)
+	name_hits=$(git diff --cached --name-only --diff-filter=ACMR | grep -i -F -f "$DENYLIST_PATTERNS" || true)
+	if [ -n "$content_hits$name_hits" ]; then
+		echo "[-] pre-commit: internal keywords found in staged files:" >&2
+		[ -n "$content_hits" ] && echo "$content_hits" | sed 's/^/      /' >&2
+		[ -n "$name_hits" ] && echo "$name_hits" | sed 's/^/      (file name) /' >&2
+		fail=1
+	fi
+fi
+
+exit $fail

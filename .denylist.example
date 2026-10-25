@@ -1,0 +1,12 @@
+# pacchain internal-keyword denylist
+#
+# Copy this file to .denylist (gitignored) and replace the entries below
+# with your real internal domains, hostnames and proxy names.
+# One fixed string per line, matched case-insensitively.
+# Lines starting with # and blank lines are ignored.
+#
+# The pre-commit and commit-msg hooks refuse any commit whose staged files
+# or commit message contain one of these strings.
+
+corp.example
+internal.example.test

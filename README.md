@@ -1,52 +1,36 @@
-pacproxy
-========
+# pacchain
 
-[![Build Status](https://travis-ci.org/williambailey/pacproxy.svg)](https://travis-ci.org/williambailey/pacproxy)
+> **Work in progress.** pacchain is a fork of
+> [williambailey/pacproxy](https://github.com/williambailey/pacproxy) being
+> adapted for pentest workflows. The full README arrives with v0.1.0.
 
-A no-frills local HTTP proxy server powered by a [proxy auto-config (PAC) file](https://web.archive.org/web/20070602031929/http://wp.netscape.com/eng/mozilla/2.0/relnotes/demo/proxy-live.html). Especially handy when you are working in an environment with many different proxy servers and your applications don't support proxy auto-configuration.
+pacchain is a local chain proxy that sits behind Burp Suite and routes each
+connection to the upstream proxy chosen by a PAC file:
 
 ```
-$ ./pacproxy -h
-pacproxy v2.0.7
-
-A no-frills local HTTP proxy server powered by a proxy auto-config (PAC) file
-https://github.com/williambailey/pacproxy
-
-Usage:
-  -c string
-        PAC file name, url or javascript to use (required)
-  -l string
-        Interface and port to listen on (default "127.0.0.1:8080")
-  -r string
-        Resolve the proxies for the provided url to STDOUT and exit
-  -v    send verbose output to STDERR
+Browser → Burp (127.0.0.1:8080) → pacchain → PAC-selected proxy / DIRECT → target
 ```
+
+Browser PAC extensions decide routing inside the browser, so traffic skips
+Burp entirely. pacchain moves the PAC evaluation behind Burp instead.
+
+## Development setup
 
 ```bash
-# shell 1
-pacproxy -c 'function FindProxyForURL(url, host){ console.log("hello pac world!"); return "PROXY random.example.com:8080"; }'
-# shell 2
-export http_proxy="127.0.0.1:8080"
-export https_proxy="127.0.0.1:8080"
-curl -I "http://www.example.com"
+git clone https://github.com/0xnashi/pacchain.git
+cd pacchain
+make hooks   # enable git hooks — run once per clone
+make test
+make build   # → bin/pacchain
 ```
 
-```bash
-pacproxy -c 'function FindProxyForURL(url, host){ return "PROXY random.example.com:8080"; }' -r "http://www.example.com"
-```
+`make hooks` creates a local `.denylist` (gitignored). Add your internal
+domains and hostnames to it; the pre-commit and commit-msg hooks refuse any
+commit containing them. Real PAC files are gitignored — only `examples/`
+may hold PAC files, and those must use reserved domains (`*.test`,
+`example.com`).
 
 ## License
 
-> Copyright 2026 William Bailey
->
-> Licensed under the Apache License, Version 2.0 (the "License");
-> you may not use this file except in compliance with the License.
-> You may obtain a copy of the License at
->
->     http://www.apache.org/licenses/LICENSE-2.0
->
-> Unless required by applicable law or agreed to in writing, software
-> distributed under the License is distributed on an "AS IS" BASIS,
-> WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-> See the License for the specific language governing permissions and
-> limitations under the License.
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Original work Copyright William Bailey.

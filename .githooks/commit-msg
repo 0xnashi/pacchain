@@ -1,0 +1,17 @@
+#!/bin/sh
+# pacchain commit-msg guard: blocks commit messages containing .denylist keywords.
+#
+# Bypass (only if you are sure): git commit --no-verify
+
+set -u
+. "$(dirname "$0")/_denylist.sh"
+
+[ -z "$DENYLIST_PATTERNS" ] && exit 0
+
+hits=$(grep -v '^#' "$1" | grep -n -i -F -f "$DENYLIST_PATTERNS" || true)
+if [ -n "$hits" ]; then
+	echo "[-] commit-msg: internal keywords found in commit message:" >&2
+	echo "$hits" | sed 's/^/      /' >&2
+	exit 1
+fi
+exit 0

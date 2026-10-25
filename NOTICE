@@ -1,0 +1,9 @@
+pacchain
+Copyright 2026 0xnashi
+
+This product is a fork of pacproxy (https://github.com/williambailey/pacproxy),
+Copyright William Bailey, licensed under the Apache License, Version 2.0.
+
+The original pacproxy source and commit history are preserved in this
+repository's git history; changes made by pacchain are identifiable via
+`git log`. See LICENSE for the full license text.

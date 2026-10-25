@@ -1,6 +1,0 @@
-language: go
-go:
- - tip
-script:
-  - make test build
-  - ./bin/pacproxy -h || true

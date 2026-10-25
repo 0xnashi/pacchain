@@ -1,4 +1,16 @@
-pacproxy
-proxy.pac
-build
+# Build output
+/bin/
+/build/
+/pacchain
+/pacproxy
+
+# Local-only files — never commit
+.denylist
 *.log
+
+# PAC / WPAD files may contain internal hostnames. Only examples/ is allowed.
+*.pac
+*.dat
+!examples/**/*.pac
+
+.DS_Store
