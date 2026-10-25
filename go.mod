@@ -1,4 +1,4 @@
-module github.com/williambailey/pacproxy
+module github.com/0xnashi/pacchain
 
 go 1.25.0
 

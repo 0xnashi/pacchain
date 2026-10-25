@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/williambailey/pacproxy/pac"
+	"github.com/0xnashi/pacchain/pac"
 )
 
 type directProxyFinder struct{}

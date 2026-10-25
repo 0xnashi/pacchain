@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"sync"
 
+	"github.com/0xnashi/pacchain/pacfunc"
 	"github.com/robertkrimen/otto"
-	"github.com/williambailey/pacproxy/pacfunc"
 )
 
 // OttoEngineOpt used to configure an OttoEngine via the NewOttoEngine func

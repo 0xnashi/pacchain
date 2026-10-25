@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/williambailey/pacproxy/pac"
+	"github.com/0xnashi/pacchain/pac"
 )
 
 type proxyHTTPHandler struct {

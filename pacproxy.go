@@ -11,20 +11,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/williambailey/pacproxy/pac"
+	"github.com/0xnashi/pacchain/pac"
 )
 
 // Name of the app
-const Name = "pacproxy"
+const Name = "pacchain"
 
 // Version of the app
-const Version = "2.0.7"
+const Version = "0.1.0-dev"
 
 // About the app
-const About = "A no-frills local HTTP proxy server powered by a proxy auto-config (PAC) file"
+const About = "A PAC-aware chain proxy for routing Burp Suite traffic through PAC-selected upstream proxies"
 
 // Repo where the app is located
-const Repo = "https://github.com/williambailey/pacproxy"
+const Repo = "https://github.com/0xnashi/pacchain"
 
 var (
 	fPac        string
