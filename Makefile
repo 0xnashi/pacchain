@@ -2,7 +2,7 @@ NAME      := pacchain
 VERSION   := $(shell awk -F\" '/^const Version/ { print $$2 }' ./pacproxy.go)
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64
 
-.PHONY: all build test hooks release clean favicon
+.PHONY: all build test devenv hooks release clean favicon
 
 all: test build
 
@@ -12,6 +12,10 @@ build:
 
 test:
 	go test -race ./...
+
+# Start local fake upstream proxies matching examples/dev.pac (no VPN needed).
+devenv:
+	go run ./cmd/fakeupstream
 
 # Enable the repo's git hooks. Run once per clone (git never installs hooks
 # automatically). Creates .denylist from the example if it does not exist.
