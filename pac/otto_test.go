@@ -89,26 +89,22 @@ func TestOttoFindProxyForURL(t *testing.T) {
 	)
 }
 
+// A PAC without a callable FindProxyForURL is rejected when it is loaded
+// (originally it loaded fine and failed on the first lookup).
 func TestOttoWithUndefinedFindProxyForURLFunction(t *testing.T) {
-	assertOtto(
-		t,
-		"1 + 1",
-		"http://www.example.com/page.html",
-		[]Proxy{},
-		"ReferenceError: 'FindProxyForURL' is not defined",
-	)
+	assertOttoRejects(t, "1 + 1")
 }
-
 func TestOttoWithNonFindProxyForURLFunction(t *testing.T) {
-	assertOtto(
-		t,
-		"FindProxyForURL = 1234",
-		"http://www.example.com/page.html",
-		[]Proxy{},
-		"TypeError: \"FindProxyForURL\" is not a function",
-	)
+	assertOttoRejects(t, "FindProxyForURL = 1234")
 }
 
+func assertOttoRejects(t *testing.T, pac string) {
+	t.Helper()
+	err := NewOttoEngine(OttoStringLoader(pac)).Start()
+	if err == nil || !strings.Contains(err.Error(), "FindProxyForURL") {
+		t.Errorf("Start(%q) err = %v, want an error naming FindProxyForURL", pac, err)
+	}
+}
 func TestOttoWithFindProxyForURLFunctionThatReturnsInvalidValue(t *testing.T) {
 	assertOtto(
 		t,

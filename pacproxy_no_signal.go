@@ -2,7 +2,5 @@
 
 package main
 
-import "github.com/0xnashi/pacchain/pac"
-
-func initSignalNotify(_ pac.EngineManager) {
+func initSignalNotify(_ func(reason string)) {
 }

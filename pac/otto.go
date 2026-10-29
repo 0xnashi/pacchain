@@ -91,6 +91,19 @@ func (o *OttoEngine) Start() error {
 		return nil
 	}
 	log.Print("initialising OttoEngine")
+	vm, err := o.compile()
+	if err != nil {
+		return err
+	}
+	o.vm = vm
+	o.isStarted = true
+	return nil
+}
+
+// compile builds a fresh VM with the PAC helper functions, runs the PAC
+// source in it, and checks that it defines FindProxyForURL. It does not
+// touch the running engine, so a failure leaves the current PAC in place.
+func (o *OttoEngine) compile() (*otto.Otto, error) {
 	vm := otto.New()
 
 	// ConvertAddr(ipaddr string)
@@ -319,23 +332,19 @@ func (o *OttoEngine) Start() error {
 		return
 	})
 
-	{
-		pac, pacError := o.loader()
-		if pacError != nil {
-			return pacError
-		}
-		// Never log the PAC source: real PAC files list internal hostnames.
-		log.Printf("PAC loaded (%d bytes)", len(pac))
-		_, pacError = runLimited(vm, o.timeout, func() (otto.Value, error) { return vm.Run(pac) })
-		if pacError != nil {
-			return pacError
-		}
+	pac, err := o.loader()
+	if err != nil {
+		return nil, err
 	}
-
-	o.vm = vm
-	o.isStarted = true
-
-	return nil
+	// Never log the PAC source: real PAC files list internal hostnames.
+	log.Printf("PAC loaded (%d bytes)", len(pac))
+	if _, err := runLimited(vm, o.timeout, func() (otto.Value, error) { return vm.Run(pac) }); err != nil {
+		return nil, err
+	}
+	if fn, err := vm.Get("FindProxyForURL"); err != nil || !fn.IsFunction() {
+		return nil, errors.New("PAC does not define a FindProxyForURL function")
+	}
+	return vm, nil
 }
 
 func (o *OttoEngine) Stop() error {
@@ -365,19 +374,27 @@ func (o *OttoEngine) Stop() error {
 	return nil
 }
 
+// Reload loads the PAC again. The new PAC is built and checked completely
+// before it replaces the current one, so lookups never see a missing or
+// half-loaded PAC, and a broken PAC leaves the previous one in service.
 func (o *OttoEngine) Reload() error {
-	if err := o.Stop(); err != nil {
+	vm, err := o.compile()
+	if err != nil {
 		return err
 	}
-	if err := o.Start(); err != nil {
-		return err
-	}
+	o.mutex.Lock()
+	defer o.mutex.Unlock()
+	o.vm = vm
+	o.isStarted = true
 	return nil
 }
 
 func (o *OttoEngine) FindProxyForURL(in *url.URL) (Proxies, error) {
 	o.mutex.Lock()
 	defer o.mutex.Unlock()
+	if o.vm == nil {
+		return Proxies{}, errors.New("PAC engine is not running")
+	}
 
 	value, err := runLimited(o.vm, o.timeout, func() (otto.Value, error) {
 		return o.vm.Call("FindProxyForURL", nil, in.String(), in.Hostname())

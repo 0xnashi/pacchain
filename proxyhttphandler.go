@@ -30,6 +30,9 @@ type proxyHTTPHandler struct {
 	// allowDirectFallback permits DIRECT after a proxy option failed
 	// (--allow-direct-fallback). Off by default: it can reach production.
 	allowDirectFallback bool
+
+	tunnelsMu sync.Mutex
+	tunnels   map[net.Conn]net.Conn // open CONNECT tunnels: client → server
 }
 
 // route is the routing decision for one request.
@@ -185,6 +188,8 @@ func (h *proxyHTTPHandler) doConnectProxy(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer clientConn.Close()
+	h.trackTunnel(clientConn, serverConn)
+	defer h.untrackTunnel(clientConn)
 	clientConn.Write([]byte("HTTP/1.0 200 OK\r\n\r\n"))
 
 	if h.verbose {
@@ -298,6 +303,37 @@ func (h *proxyHTTPHandler) doHTTPProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+func (h *proxyHTTPHandler) trackTunnel(client, server net.Conn) {
+	h.tunnelsMu.Lock()
+	defer h.tunnelsMu.Unlock()
+	if h.tunnels == nil {
+		h.tunnels = make(map[net.Conn]net.Conn)
+	}
+	h.tunnels[client] = server
+}
+
+func (h *proxyHTTPHandler) untrackTunnel(client net.Conn) {
+	h.tunnelsMu.Lock()
+	defer h.tunnelsMu.Unlock()
+	delete(h.tunnels, client)
+}
+
+// closeTunnels closes every open CONNECT tunnel and idle upstream HTTP
+// connection, so nothing keeps a route chosen by a previous PAC. It returns
+// the number of tunnels closed.
+func (h *proxyHTTPHandler) closeTunnels() int {
+	h.tunnelsMu.Lock()
+	n := len(h.tunnels)
+	for client, server := range h.tunnels {
+		client.Close()
+		server.Close()
+	}
+	h.tunnels = nil
+	h.tunnelsMu.Unlock()
+	h.httpClient.CloseIdleConnections()
+	return n
 }
 
 // decisionDetail is the parenthesised part of a log line:

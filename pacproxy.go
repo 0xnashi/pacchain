@@ -112,7 +112,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return resolve(engine, o.resolveURL, stdout, con)
 	}
 
-	initSignalNotify(engine)
 	return listen(engine, o, con)
 }
 
@@ -151,6 +150,12 @@ func listen(engine *pac.OttoEngine, o options, con *console) int {
 	handler.verbose = o.verbose
 	handler.pacName = shortPACName(o.pac)
 	handler.allowDirectFallback = o.allowDirectFallback
+
+	rl := &reloader{engine: engine, handler: handler, con: con, name: shortPACName(o.pac)}
+	initSignalNotify(rl.reload)
+	if isPACFile(o.pac) {
+		watchPAC(o.pac, pacWatchInterval, con, func() { rl.reload("file changed") })
+	}
 	if o.allowDirectFallback {
 		con.warnf("--allow-direct-fallback: if a proxy fails and the PAC lists DIRECT next, " +
 			"traffic goes straight to the target (for STG hostnames: production)")
