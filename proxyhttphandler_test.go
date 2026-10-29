@@ -28,7 +28,7 @@ func (f *fixedProxyFinder) FindProxyForURL(in *url.URL) (pac.Proxies, error) {
 }
 
 func newTestHandler(finder pac.ProxyFinder) *proxyHTTPHandler {
-	return newProxyHTTPHandler(finder, &pac.FirstItemSelector{}, nil)
+	return newProxyHTTPHandler(finder, nil)
 }
 
 func TestConnectDirectClosesFDs(t *testing.T) {

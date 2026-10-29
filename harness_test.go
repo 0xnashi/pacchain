@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -27,7 +28,7 @@ func newPacchain(t *testing.T, pacSrc string) *httptest.Server {
 	if err := engine.Start(); err != nil {
 		t.Fatalf("start PAC engine: %v", err)
 	}
-	srv := httptest.NewServer(newProxyHTTPHandler(engine, &pac.FirstItemSelector{}, nil))
+	srv := httptest.NewServer(newProxyHTTPHandler(engine, nil))
 	t.Cleanup(func() {
 		srv.Close()
 		engine.Stop()
@@ -38,15 +39,24 @@ func newPacchain(t *testing.T, pacSrc string) *httptest.Server {
 // newLoggedPacchain is newPacchain with the connection log captured.
 func newLoggedPacchain(t *testing.T, pacSrc string, verbose bool) (*httptest.Server, *syncBuffer) {
 	t.Helper()
+	return newPacchainWith(t, pacSrc, func(h *proxyHTTPHandler) { h.verbose = verbose })
+}
+
+// newPacchainWith starts pacchain with its log captured; configure may
+// change handler settings (e.g. allowDirectFallback) before it starts.
+func newPacchainWith(t *testing.T, pacSrc string, configure func(*proxyHTTPHandler)) (*httptest.Server, *syncBuffer) {
+	t.Helper()
 	engine := pac.NewOttoEngine(pac.OttoStringLoader(pacSrc))
 	if err := engine.Start(); err != nil {
 		t.Fatalf("start PAC engine: %v", err)
 	}
 	logBuf := &syncBuffer{}
-	h := newProxyHTTPHandler(engine, &pac.FirstItemSelector{}, nil)
+	h := newProxyHTTPHandler(engine, nil)
 	h.con = newConsole(logBuf)
-	h.verbose = verbose
 	h.pacName = "test.pac"
+	if configure != nil {
+		configure(h)
+	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(func() {
 		srv.Close()
@@ -85,6 +95,18 @@ func waitForLog(t *testing.T, logBuf *syncBuffer, want string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("log never contained %q; log:\n%s", want, logBuf.String())
+}
+
+// deadAddr returns a localhost address where nothing listens.
+func deadAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
 }
 
 // newFakeUpstream starts a fake upstream proxy on a random port.

@@ -1,9 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,7 +19,6 @@ import (
 
 type proxyHTTPHandler struct {
 	proxyFinder     pac.ProxyFinder
-	proxySelector   pac.ProxySelector
 	httpClient      *http.Client
 	dialer          *net.Dialer
 	nonProxyHandler http.Handler
@@ -27,13 +26,17 @@ type proxyHTTPHandler struct {
 	con     *console // connection log; nil disables it
 	verbose bool     // -v: tunnel close stats and extra detail
 	pacName string   // shown in log lines, e.g. "env-a.pac"
+
+	// allowDirectFallback permits DIRECT after a proxy option failed
+	// (--allow-direct-fallback). Off by default: it can reach production.
+	allowDirectFallback bool
 }
 
 // route is the routing decision for one request.
 type route struct {
 	target  string        // what the client asked for, safe to log (no query string)
-	options pac.Proxies   // everything the PAC returned
-	proxy   pac.Proxy     // the option pacchain uses (pac.DirectProxy for DIRECT)
+	options pac.Proxies   // everything the PAC returned, in order
+	proxy   pac.Proxy     // the option being tried / used (pac.DirectProxy for DIRECT)
 	took    time.Duration // PAC evaluation time
 }
 
@@ -43,7 +46,6 @@ type routeKey struct{}
 
 func newProxyHTTPHandler(
 	proxyFinder pac.ProxyFinder,
-	proxySelector pac.ProxySelector,
 	nonProxyHandler http.Handler,
 ) *proxyHTTPHandler {
 	dialer := &net.Dialer{
@@ -63,8 +65,7 @@ func newProxyHTTPHandler(
 		DialContext:           dialer.DialContext,
 	}
 	handler := &proxyHTTPHandler{
-		proxyFinder:   proxyFinder,
-		proxySelector: proxySelector,
+		proxyFinder: proxyFinder,
 		httpClient: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -92,7 +93,7 @@ func (h *proxyHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// decide runs the PAC for r and selects the proxy to use.
+// decide runs the PAC for r. An empty PAC answer means DIRECT.
 func (h *proxyHTTPHandler) decide(r *http.Request) (route, error) {
 	start := time.Now()
 	proxies, err := h.proxyFinder.FindProxyForURL(r.URL)
@@ -100,12 +101,15 @@ func (h *proxyHTTPHandler) decide(r *http.Request) (route, error) {
 	if err != nil {
 		return rt, err
 	}
+	if len(proxies) == 0 {
+		proxies = pac.Proxies{pac.DirectProxy}
+	}
 	rt.options = proxies
-	rt.proxy = h.proxySelector.SelectProxy(proxies)
 	return rt, nil
 }
 
-// transportProxy is the http.Transport Proxy hook for the HTTP path.
+// transportProxy is the http.Transport Proxy hook for the HTTP path. It uses
+// the option doHTTPProxy is currently trying, passed in the request context.
 func (h *proxyHTTPHandler) transportProxy(r *http.Request) (*url.URL, error) {
 	rt, ok := r.Context().Value(routeKey{}).(route)
 	if !ok {
@@ -113,6 +117,7 @@ func (h *proxyHTTPHandler) transportProxy(r *http.Request) (*url.URL, error) {
 		if rt, err = h.decide(r); err != nil {
 			return nil, err
 		}
+		rt.proxy = rt.options[0]
 	}
 	if rt.proxy == pac.DirectProxy {
 		return nil, nil
@@ -127,58 +132,65 @@ func (h *proxyHTTPHandler) transportProxy(r *http.Request) (*url.URL, error) {
 }
 
 func (h *proxyHTTPHandler) doConnectProxy(w http.ResponseWriter, r *http.Request) {
-	var (
-		clientConn net.Conn
-		serverConn net.Conn
-		err        error
-	)
-
 	rt, err := h.decide(r)
 	if err != nil {
 		h.con.errorf("CONNECT %s → PAC error: %v", rt.target, err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	removeProxyHeaders(r)
+	detail := h.decisionDetail(rt)
 
-	if rt.proxy == pac.DirectProxy {
-		serverConn, err = h.dialer.Dial("tcp", r.URL.Host)
-	} else {
-		serverConn, err = h.dialer.Dial("tcp", proxyAddr(rt.proxy))
+	// Open the tunnel before answering the client: pacchain says 200 only
+	// once an upstream said 200 (or DIRECT connected).
+	var (
+		serverConn   net.Conn
+		serverReader io.Reader
+	)
+	f := newFailover(rt.options, h.allowDirectFallback)
+	for p, ok := f.next(); ok; p, ok = f.next() {
+		var err error
+		if f.blocked(p) {
+			err = errDirectFallbackBlocked
+		} else {
+			serverConn, serverReader, err = h.openTunnel(r, p)
+		}
+		if err == nil {
+			rt.proxy = p
+			break
+		}
+		f.failed(p, err)
+		h.logFailure(f, "CONNECT", rt.target, p, err, detail)
 	}
-	if err != nil {
-		h.con.errorf("CONNECT %s → %s failed: %v%s", rt.target, rt.proxy, err, h.decisionDetail(rt))
-		http.Error(w, err.Error(), http.StatusBadGateway)
+	if serverConn == nil {
+		http.Error(w, f.report(rt.target), http.StatusBadGateway)
 		return
 	}
 	defer serverConn.Close()
-	if rt.proxy != pac.DirectProxy {
-		removeProxyHeaders(r)
-		r.Write(serverConn) // forward the CONNECT to the upstream proxy
-	}
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		err = errors.New("unable to get hijacker")
-		h.con.errorf("CONNECT %s: %v", rt.target, err)
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		h.con.errorf("CONNECT %s: unable to get hijacker", rt.target)
+		http.Error(w, "unable to get hijacker", http.StatusBadGateway)
 		return
 	}
-	clientConn, _, err = hj.Hijack()
+	clientConn, clientBuf, err := hj.Hijack()
 	if err != nil {
 		h.con.errorf("CONNECT %s: %v", rt.target, err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer clientConn.Close()
-	if rt.proxy == pac.DirectProxy {
-		clientConn.Write([]byte("HTTP/1.0 200 OK\r\n\r\n"))
-	}
+	clientConn.Write([]byte("HTTP/1.0 200 OK\r\n\r\n"))
 
-	detail := h.decisionDetail(rt)
 	if h.verbose {
 		detail += " remote=" + serverConn.RemoteAddr().String()
 	}
-	h.con.connf("CONNECT %s → %s%s", rt.target, rt.proxy, detail)
+	if f.fellBackToDirect(rt.proxy) {
+		h.con.warnf("CONNECT %s → DIRECT after a proxy failed: connected to the target directly, not through a proxy%s", rt.target, detail)
+	} else {
+		h.con.connf("CONNECT %s → %s%s", rt.target, rt.proxy, detail)
+	}
 
 	opened := time.Now()
 	var sent, received int64
@@ -186,13 +198,14 @@ func (h *proxyHTTPHandler) doConnectProxy(w http.ResponseWriter, r *http.Request
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		received, _ = io.Copy(clientConn, serverConn)
+		received, _ = io.Copy(clientConn, serverReader)
 		clientConn.SetDeadline(time.Now().Add(10 * time.Millisecond))
 	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		sent, _ = io.Copy(serverConn, clientConn)
+		// clientBuf holds anything the client sent right after its CONNECT.
+		sent, _ = io.Copy(serverConn, clientBuf.Reader)
 		serverConn.SetDeadline(time.Now().Add(10 * time.Millisecond))
 	}()
 	wg.Wait()
@@ -211,14 +224,58 @@ func (h *proxyHTTPHandler) doHTTPProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	removeProxyHeaders(r)
-	resp, err := h.httpClient.Do(r.WithContext(context.WithValue(r.Context(), routeKey{}, rt)))
-	if err != nil && resp == nil {
-		h.con.errorf("%s %s → %s failed: %v%s", r.Method, rt.target, rt.proxy, err, h.decisionDetail(rt))
+	detail := h.decisionDetail(rt)
+
+	body, canRetry, err := replayableBody(r, len(rt.options) > 1)
+	if err != nil {
+		h.con.errorf("%s %s: read request body: %v", r.Method, rt.target, err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+
+	var resp *http.Response
+	f := newFailover(rt.options, h.allowDirectFallback)
+	for p, ok := f.next(); ok; p, ok = f.next() {
+		var err error
+		if f.blocked(p) {
+			err = errDirectFallbackBlocked
+		} else {
+			rt.proxy = p
+			req := r.WithContext(context.WithValue(r.Context(), routeKey{}, rt))
+			if body != nil {
+				req.Body = io.NopCloser(bytes.NewReader(body))
+				req.ContentLength = int64(len(body))
+			}
+			resp, err = h.httpClient.Do(req)
+			if err != nil {
+				err = unwrapURLError(err)
+			} else if resp.StatusCode == http.StatusProxyAuthRequired && p != pac.DirectProxy {
+				// 407 only ever comes from a proxy: report it like on CONNECT.
+				resp.Body.Close()
+				resp, err = nil, &upstreamAnswerError{status: resp.Status}
+			}
+		}
+		if err == nil {
+			break
+		}
+		if !canRetry {
+			f.stop() // the body was streamed and cannot be sent again
+		}
+		f.failed(p, err)
+		h.logFailure(f, r.Method, rt.target, p, err, detail)
+	}
+	if resp == nil {
+		http.Error(w, f.report(rt.target), http.StatusBadGateway)
+		return
+	}
 	defer resp.Body.Close()
-	h.con.connf("%s %s → %s%s %d", r.Method, rt.target, rt.proxy, h.decisionDetail(rt), resp.StatusCode)
+
+	if f.fellBackToDirect(rt.proxy) {
+		h.con.warnf("%s %s → DIRECT after a proxy failed: sent to the target directly, not through a proxy%s %d",
+			r.Method, rt.target, detail, resp.StatusCode)
+	} else {
+		h.con.connf("%s %s → %s%s %d", r.Method, rt.target, rt.proxy, detail, resp.StatusCode)
+	}
 
 	wh := w.Header()
 	clearHeaders(wh)

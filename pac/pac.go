@@ -38,22 +38,6 @@ type ProxyFinder interface {
 	FindProxyForURL(in *url.URL) (Proxies, error)
 }
 
-// ProxySelector for proxy selection
-type ProxySelector interface {
-	SelectProxy(from Proxies) Proxy
-}
-
-/* TODO: Look again at handling multiple proxy entries better...
-// ProxyChecker is used when trying to decide which proxy one might use
-type ProxyChecker interface {
-	IsHealthy(p Proxy) bool
-	RecordSuccess(p Proxy)
-	RecordFailure(p Proxy)
-	ResetRecord(p Proxy)
-	ResetAll()
-}
-*/
-
 // Proxy information struct
 type Proxy struct {
 	Hostname string

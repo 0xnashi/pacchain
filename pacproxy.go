@@ -42,6 +42,8 @@ type options struct {
 	verbose    bool
 	resolveURL string
 	version    bool
+
+	allowDirectFallback bool
 }
 
 func main() {
@@ -59,6 +61,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&o.verbose, "v", false, "send verbose output to STDERR")
 	fs.StringVar(&o.resolveURL, "r", "", "Resolve the proxies for the provided url to STDOUT and exit")
 	fs.BoolVar(&o.version, "version", false, "Print the version and exit")
+	fs.BoolVar(&o.allowDirectFallback, "allow-direct-fallback", false,
+		"Allow DIRECT after a PAC proxy option failed (off by default: may reach production)")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s v%s\n\n%s\n%s\n\nUsage:\n", Name, Version, About, Repo)
 		fs.PrintDefaults()
@@ -142,10 +146,15 @@ func listen(engine *pac.OttoEngine, o options, con *console) int {
 	}
 	con.infof("%s %s listening on %s (PAC: %s)", Name, Version, ln.Addr(), describePACSource(o.pac))
 
-	handler := newProxyHTTPHandler(engine, &pac.FirstItemSelector{}, newNonProxyHTTPHandler())
+	handler := newProxyHTTPHandler(engine, newNonProxyHTTPHandler())
 	handler.con = con
 	handler.verbose = o.verbose
 	handler.pacName = shortPACName(o.pac)
+	handler.allowDirectFallback = o.allowDirectFallback
+	if o.allowDirectFallback {
+		con.warnf("--allow-direct-fallback: if a proxy fails and the PAC lists DIRECT next, " +
+			"traffic goes straight to the target (for STG hostnames: production)")
+	}
 
 	srv := &http.Server{
 		ReadHeaderTimeout: 2 * time.Second,

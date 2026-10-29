@@ -132,3 +132,10 @@ func TestMissingPACFileFailsVisibly(t *testing.T) {
 		t.Errorf("stderr does not explain the problem: %q", errOut)
 	}
 }
+
+func TestAllowDirectFallbackFlagIsAccepted(t *testing.T) {
+	code, _, errOut := runCLI("-c", pac.DirectPAC, "--allow-direct-fallback", "-r", "https://a.test/")
+	if code != 0 {
+		t.Errorf("exit code %d: %s", code, errOut)
+	}
+}
