@@ -44,9 +44,9 @@ func newLoggedPacchain(t *testing.T, pacSrc string, verbose bool) (*httptest.Ser
 
 // newPacchainWith starts pacchain with its log captured; configure may
 // change handler settings (e.g. allowDirectFallback) before it starts.
-func newPacchainWith(t *testing.T, pacSrc string, configure func(*proxyHTTPHandler)) (*httptest.Server, *syncBuffer) {
+func newPacchainWith(t *testing.T, pacSrc string, configure func(*proxyHTTPHandler), engineOpts ...pac.OttoEngineOpt) (*httptest.Server, *syncBuffer) {
 	t.Helper()
-	engine := pac.NewOttoEngine(pac.OttoStringLoader(pacSrc))
+	engine := pac.NewOttoEngine(append([]pac.OttoEngineOpt{pac.OttoStringLoader(pacSrc)}, engineOpts...)...)
 	if err := engine.Start(); err != nil {
 		t.Fatalf("start PAC engine: %v", err)
 	}

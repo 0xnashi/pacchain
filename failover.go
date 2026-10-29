@@ -85,6 +85,26 @@ func (f *failover) answer() (*upstreamAnswerError, pac.Proxy, bool) {
 	return nil, pac.Proxy{}, false
 }
 
+// vpnHint is shown when a proxy cannot be reached or resolved: with STG
+// proxies behind a VPN, that almost always means the VPN is disconnected.
+const vpnHint = "proxy unreachable: is the VPN connected?"
+
+// isDialError reports whether err happened while connecting (refused,
+// timeout, DNS lookup), as opposed to after a connection was made.
+func isDialError(err error) bool {
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if op, ok := e.(*net.OpError); ok && op.Op == "dial" {
+			return true
+		}
+	}
+	return false
+}
+
+// needsVPNHint reports whether a failed attempt through p warrants vpnHint.
+func needsVPNHint(p pac.Proxy, err error) bool {
+	return p != pac.DirectProxy && isDialError(err)
+}
+
 var errDirectFallbackBlocked = errors.New("DIRECT fallback blocked: a proxy option failed, " +
 	"and DIRECT for this host may reach production; start pacchain with --allow-direct-fallback to permit it")
 
@@ -159,8 +179,13 @@ func (f *failover) fellBackToDirect(p pac.Proxy) bool {
 func (f *failover) report(target string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "pacchain: could not reach %s\n", target)
+	hint := false
 	for _, a := range f.attempts {
 		fmt.Fprintf(&b, "  %s: %v\n", a.proxy, a.err)
+		hint = hint || needsVPNHint(a.proxy, a.err)
+	}
+	if hint {
+		fmt.Fprintf(&b, "\nhint: %s\n", vpnHint)
 	}
 	return b.String()
 }
@@ -169,6 +194,9 @@ func (f *failover) report(target string) string {
 // follows, [-] (with the decision detail) when it ends the request.
 func (h *proxyHTTPHandler) logFailure(f *failover, method, target string, p pac.Proxy, err error, detail string) {
 	msg := fmt.Sprintf("%s %s → %s failed: %v", method, target, p, err)
+	if needsVPNHint(p, err) {
+		msg += " (" + vpnHint + ")"
+	}
 	if errors.Is(err, errDirectFallbackBlocked) {
 		msg = fmt.Sprintf("%s %s → DIRECT fallback blocked (use --allow-direct-fallback to permit)", method, target)
 	}

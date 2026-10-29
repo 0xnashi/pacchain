@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/0xnashi/pacchain/internal/fakeupstream"
+	"github.com/0xnashi/pacchain/pac"
 )
 
 func pacReturning(answer string) string {
@@ -268,4 +269,54 @@ func TestHTTPUpstream407IsRelayedWithSource(t *testing.T) {
 		t.Error("failed over after a 407")
 	}
 	waitForLog(t, logBuf, "[-] GET http://web.deny.test/ → PROXY "+deny.Addr()+" failed: answered 407")
+}
+
+// --- error hints and PAC failures -------------------------------------------
+
+// An unreachable or unresolvable proxy usually means the VPN is down.
+func TestUnreachableProxyHintsVPN(t *testing.T) {
+	for name, proxy := range map[string]string{
+		"refused":      deadAddr(t),
+		"unresolvable": "proxy.nonexistent.invalid:8080",
+	} {
+		t.Run(name, func(t *testing.T) {
+			chain, logBuf := newPacchainWith(t, pacReturning("PROXY "+proxy), nil)
+			_, _, body := rawCONNECT(t, chain, "x.down.test:443")
+			if !strings.Contains(body, "VPN") {
+				t.Errorf("502 body has no VPN hint:\n%s", body)
+			}
+			waitForLog(t, logBuf, "VPN")
+		})
+	}
+}
+
+// DIRECT failing says nothing about the proxies, so no VPN hint.
+func TestDirectFailureHasNoVPNHint(t *testing.T) {
+	chain, logBuf := newPacchainWith(t, pacReturning("DIRECT"), nil)
+	_, _, body := rawCONNECT(t, chain, deadAddr(t))
+	waitForLog(t, logBuf, "[-] CONNECT")
+	if strings.Contains(body, "VPN") || strings.Contains(logBuf.String(), "VPN") {
+		t.Errorf("unexpected VPN hint for a DIRECT failure:\n%s\n%s", body, logBuf)
+	}
+}
+
+// A PAC that loops for one host fails that request quickly, is logged, and
+// does not stop other requests from being served.
+func TestPACTimeoutFailsOnlyThatRequest(t *testing.T) {
+	a := newFakeUpstream(t, "stg-a", fakeupstream.ModeOK)
+	chain, logBuf := newPacchainWith(t, fmt.Sprintf(`function FindProxyForURL(url, host) {
+		if (host == "loop.test") { while (true) {} }
+		return "PROXY %s";
+	}`, a.Addr()), nil, pac.OttoTimeout(100*time.Millisecond))
+
+	status, _, body := rawCONNECT(t, chain, "loop.test:443")
+	if !strings.HasPrefix(status, "502") || !strings.Contains(body, "timed out") {
+		t.Fatalf("status %q, body %q", status, body)
+	}
+	waitForLog(t, logBuf, "[-] CONNECT loop.test:443 → PAC error: PAC evaluation timed out")
+
+	resp, _ := fetch(t, clientVia(t, chain), "https://app.a.stg.test/")
+	if resp.Header.Get("X-Fake-Upstream") != "stg-a" {
+		t.Error("requests after a PAC timeout are no longer served")
+	}
 }

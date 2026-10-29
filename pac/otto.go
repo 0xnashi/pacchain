@@ -2,9 +2,11 @@ package pac
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/url"
 	"sync"
+	"time"
 
 	"github.com/0xnashi/pacchain/pacfunc"
 	"github.com/robertkrimen/otto"
@@ -20,6 +22,22 @@ func OttoLoader(fn Loader) OttoEngineOpt {
 	}
 }
 
+// DefaultTimeout bounds one PAC evaluation. A normal PAC answers in well
+// under a millisecond; this only catches broken or hostile PAC files.
+// Note: a Go helper such as dnsResolve() cannot be interrupted while it
+// blocks; the limit applies as soon as it returns to JavaScript.
+const DefaultTimeout = 3 * time.Second
+
+// ErrPACTimeout is returned when PAC code runs longer than its timeout.
+var ErrPACTimeout = errors.New("PAC evaluation timed out")
+
+// OttoTimeout bounds each PAC evaluation and the initial PAC load.
+func OttoTimeout(d time.Duration) OttoEngineOpt {
+	return func(o *OttoEngine) {
+		o.timeout = d
+	}
+}
+
 // OttoStringLoader implements a string loader
 func OttoStringLoader(pac string) OttoEngineOpt {
 	return OttoLoader(func() (string, error) {
@@ -30,7 +48,8 @@ func OttoStringLoader(pac string) OttoEngineOpt {
 // NewOttoEngine instance with configuration
 func NewOttoEngine(opts ...OttoEngineOpt) *OttoEngine {
 	otto := &OttoEngine{
-		mutex: &sync.RWMutex{},
+		mutex:   &sync.RWMutex{},
+		timeout: DefaultTimeout,
 		loader: func() (string, error) {
 			return "", errors.New("pac loader has not been configured")
 		},
@@ -43,6 +62,7 @@ func NewOttoEngine(opts ...OttoEngineOpt) *OttoEngine {
 
 // OttoEngine struct
 type OttoEngine struct {
+	timeout   time.Duration
 	mutex     *sync.RWMutex
 	loader    Loader
 	isStarted bool
@@ -306,7 +326,7 @@ func (o *OttoEngine) Start() error {
 		}
 		// Never log the PAC source: real PAC files list internal hostnames.
 		log.Printf("PAC loaded (%d bytes)", len(pac))
-		_, pacError = vm.Run(pac)
+		_, pacError = runLimited(vm, o.timeout, func() (otto.Value, error) { return vm.Run(pac) })
 		if pacError != nil {
 			return pacError
 		}
@@ -359,7 +379,9 @@ func (o *OttoEngine) FindProxyForURL(in *url.URL) (Proxies, error) {
 	o.mutex.Lock()
 	defer o.mutex.Unlock()
 
-	value, err := o.vm.Call("FindProxyForURL", nil, in.String(), in.Hostname())
+	value, err := runLimited(o.vm, o.timeout, func() (otto.Value, error) {
+		return o.vm.Call("FindProxyForURL", nil, in.String(), in.Hostname())
+	})
 	if err != nil {
 		return Proxies{}, err
 	}
@@ -370,4 +392,35 @@ func (o *OttoEngine) FindProxyForURL(in *url.URL) (Proxies, error) {
 	}
 
 	return ParseFindProxyString(findProxyString)
+}
+
+// interrupted is the panic value used to stop a running PAC. otto re-panics
+// values that are not its own errors, so runLimited can recover it.
+type interrupted struct{}
+
+// runLimited runs fn on vm, interrupting it after d. otto checks vm.Interrupt
+// before every statement, so even `while (true) {}` stops. The channel is
+// per call and never closed: otto would call the nil func a closed channel
+// yields.
+func runLimited(vm *otto.Otto, d time.Duration, fn func() (otto.Value, error)) (value otto.Value, err error) {
+	if d <= 0 {
+		return fn()
+	}
+	interrupt := make(chan func(), 1)
+	vm.Interrupt = interrupt
+	timer := time.AfterFunc(d, func() {
+		interrupt <- func() { panic(interrupted{}) }
+	})
+	defer func() {
+		timer.Stop()
+		vm.Interrupt = nil // a late interrupt stays in the abandoned channel
+		if r := recover(); r != nil {
+			if _, ok := r.(interrupted); ok {
+				err = fmt.Errorf("%w after %s", ErrPACTimeout, d)
+				return
+			}
+			panic(r)
+		}
+	}()
+	return fn()
 }

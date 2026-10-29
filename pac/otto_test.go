@@ -2,11 +2,13 @@ package pac
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func assertOtto(t *testing.T, pac string, u string, p []Proxy, e string) {
@@ -164,5 +166,64 @@ func TestHTTPLoaderDoesNotLogQueryString(t *testing.T) {
 	HTTPLoader(u)() // fails to connect; only the log line matters
 	if strings.Contains(buf.String(), "SECRET123") {
 		t.Errorf("query string leaked into the log:\n%s", buf.String())
+	}
+}
+
+// A PAC stuck in a loop must not hang pacchain: evaluation is interrupted and
+// reported, and the engine keeps working for other hosts.
+func TestFindProxyForURLTimesOut(t *testing.T) {
+	o := NewOttoEngine(
+		OttoStringLoader(`function FindProxyForURL(url, host) {
+			if (host == "loop.test") { while (true) {} }
+			return "DIRECT";
+		}`),
+		OttoTimeout(100*time.Millisecond),
+	)
+	if err := o.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer o.Stop()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := o.FindProxyForURL(&url.URL{Scheme: "https", Host: "loop.test"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrPACTimeout) {
+			t.Fatalf("err = %v, want ErrPACTimeout", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("PAC evaluation hung")
+	}
+
+	proxies, err := o.FindProxyForURL(&url.URL{Scheme: "https", Host: "ok.test"})
+	if err != nil || proxies.String() != "DIRECT" {
+		t.Errorf("engine unusable after a timeout: %v, %v", proxies, err)
+	}
+}
+
+// Top-level PAC code runs once at load time; a loop there must fail the load.
+func TestStartTimesOutOnTopLevelLoop(t *testing.T) {
+	o := NewOttoEngine(
+		OttoStringLoader(`while (true) {} function FindProxyForURL(url, host) { return "DIRECT"; }`),
+		OttoTimeout(100*time.Millisecond),
+	)
+	done := make(chan error, 1)
+	go func() { done <- o.Start() }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrPACTimeout) {
+			t.Fatalf("Start err = %v, want ErrPACTimeout", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("PAC load hung")
+	}
+}
+
+func TestDefaultTimeoutIsSet(t *testing.T) {
+	if o := NewOttoEngine(); o.timeout != DefaultTimeout || DefaultTimeout <= 0 {
+		t.Errorf("timeout = %s, want DefaultTimeout (%s)", o.timeout, DefaultTimeout)
 	}
 }

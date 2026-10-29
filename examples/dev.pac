@@ -11,6 +11,7 @@
 //   *.down.test          → nothing listening on :18999
 //   *.failover.test      → dead proxy first, then stg-b
 //   *.fallback.test      → dead proxy first, then DIRECT
+//   *.loop.test          → PAC never returns (pacchain stops it after 3s)
 //   everything else      → DIRECT
 function FindProxyForURL(url, host) {
   if (dnsDomainIs(host, ".a.stg.test")) return "PROXY 127.0.0.1:18431";
@@ -21,5 +22,6 @@ function FindProxyForURL(url, host) {
   if (dnsDomainIs(host, ".down.test")) return "PROXY 127.0.0.1:18999";
   if (dnsDomainIs(host, ".failover.test")) return "PROXY 127.0.0.1:18999; PROXY 127.0.0.1:18432";
   if (dnsDomainIs(host, ".fallback.test")) return "PROXY 127.0.0.1:18999; DIRECT";
+  if (dnsDomainIs(host, ".loop.test")) { while (true) {} }
   return "DIRECT";
 }
