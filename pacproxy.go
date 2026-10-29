@@ -1,14 +1,17 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/0xnashi/pacchain/pac"
@@ -17,8 +20,9 @@ import (
 // Name of the app
 const Name = "pacchain"
 
-// Version of the app
-const Version = "0.1.0-dev"
+// Version of the app. Release builds may override it with
+// -ldflags "-X main.Version=x.y.z".
+var Version = "0.1.0-dev"
 
 // About the app
 const About = "A PAC-aware chain proxy for routing Burp Suite traffic through PAC-selected upstream proxies"
@@ -26,42 +30,63 @@ const About = "A PAC-aware chain proxy for routing Burp Suite traffic through PA
 // Repo where the app is located
 const Repo = "https://github.com/0xnashi/pacchain"
 
-var (
-	fPac        string
-	fListen     string
-	fVerbose    bool
-	fResolveURL string
-)
+// DefaultListen is loopback-only on purpose: anyone who can reach the
+// listener can send traffic through your VPN and upstream proxies.
+// Port 8888 avoids Burp's default 8080.
+const DefaultListen = "127.0.0.1:8888"
 
-func init() {
-	flag.StringVar(&fPac, "c", "", "PAC file name, url or javascript to use (required)")
-	flag.StringVar(&fListen, "l", "127.0.0.1:8080", "Interface and port to listen on")
-	flag.BoolVar(&fVerbose, "v", false, "send verbose output to STDERR")
-	flag.StringVar(&fResolveURL, "r", "", "Resolve the proxies for the provided url to STDOUT and exit")
+type options struct {
+	pac        string
+	listen     string
+	verbose    bool
+	resolveURL string
+	version    bool
 }
 
 func main() {
-	flag.Usage = func() {
-		// fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s:\n", os.Args[0])
-		fmt.Fprintf(flag.CommandLine.Output(), "%s v%s\n\n%s\n%s\n\nUsage:\n", Name, Version, About, Repo)
-		flag.PrintDefaults()
-	}
-	flag.Parse()
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
 
-	seen := make(map[string]bool)
-	flag.Visit(func(f *flag.Flag) { seen[f.Name] = true })
-	required := []string{"c"}
-	for _, req := range required {
-		if !seen[req] {
-			exitWithUsage(fmt.Sprintf("Missing required flag -%s", req))
+// run is the whole command line program. It returns the process exit code:
+// 0 success, 1 runtime failure, 2 usage error.
+func run(args []string, stdout, stderr io.Writer) int {
+	var o options
+	fs := flag.NewFlagSet(Name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.StringVar(&o.pac, "c", "", "PAC file name, url or javascript to use (required)")
+	fs.StringVar(&o.listen, "l", DefaultListen, "Interface and port to listen on")
+	fs.BoolVar(&o.verbose, "v", false, "send verbose output to STDERR")
+	fs.StringVar(&o.resolveURL, "r", "", "Resolve the proxies for the provided url to STDOUT and exit")
+	fs.BoolVar(&o.version, "version", false, "Print the version and exit")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "%s v%s\n\n%s\n%s\n\nUsage:\n", Name, Version, About, Repo)
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
 		}
+		return 2 // the flag package already printed the error and usage
 	}
-	if strings.TrimSpace(fPac) == "" {
-		exitWithUsage("Unexpected empty value for -c")
+	if o.version {
+		fmt.Fprintf(stdout, "%s %s\n", Name, Version)
+		return 0
+	}
+	if strings.TrimSpace(o.pac) == "" {
+		fmt.Fprintln(stderr, "Missing required flag -c")
+		fs.Usage()
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "Unexpected argument %q\n", fs.Arg(0))
+		fs.Usage()
+		return 2
 	}
 
-	if fVerbose {
-		log.SetOutput(os.Stderr)
+	con := newConsole(stderr)
+	if o.verbose {
+		log.SetOutput(stderr)
 	} else {
 		log.SetOutput(io.Discard)
 	}
@@ -69,59 +94,108 @@ func main() {
 	log.SetFlags(log.Ldate | log.Lmicroseconds | log.Lshortfile | log.LUTC)
 	log.Printf("Starting %s v%s", Name, Version)
 
-	otto := pac.NewOttoEngine(
-		pac.OttoLoader(pac.SmartLoader(fPac)),
+	engine := pac.NewOttoEngine(
+		pac.OttoLoader(pac.SmartLoader(o.pac)),
 	)
-	if err := otto.Start(); err != nil {
-		log.Panic(err)
+	if err := engine.Start(); err != nil {
+		con.errorf("load PAC from %s: %v", describePACSource(o.pac), err)
+		return 1
 	}
-	defer otto.Stop()
+	defer engine.Stop()
 
-	initSignalNotify(otto)
-
-	if fResolveURL != "" {
-		do_resolve(otto)
-		return
+	if o.resolveURL != "" {
+		return resolve(engine, o.resolveURL, stdout, con)
 	}
-	listen(otto)
+
+	initSignalNotify(engine)
+	return listen(engine, o, con)
 }
 
-func exitWithUsage(message string) {
-	os.Stderr.WriteString(message)
-	os.Stderr.WriteString("\n")
-	flag.Usage()
-	os.Exit(2) // the same exit code flag.Parse uses
-}
-
-func do_resolve(otto *pac.OttoEngine) {
-	u, err := url.Parse(fResolveURL)
+// resolve prints the PAC result for one URL, one proxy per line (-r).
+func resolve(engine *pac.OttoEngine, rawURL string, stdout io.Writer, con *console) int {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		con.errorf("-r needs a full URL such as https://%s/", strings.TrimPrefix(rawURL, "//"))
+		return 2
+	}
+	proxies, err := engine.FindProxyForURL(u)
 	if err != nil {
-		log.Printf("Unable to parse resolve URL %q: %s", fResolveURL, err)
-		os.Exit(1)
+		con.errorf("PAC evaluation failed for %s: %v", u.Host, err)
+		return 1
 	}
-	proxies, err := otto.FindProxyForURL(u)
-	if err != nil {
-		log.Printf("Error while trying to find proxy for URL %q: %s", fResolveURL, err)
-		os.Exit(1)
+	for _, p := range proxies {
+		fmt.Fprintln(stdout, p)
 	}
-	for i := 0; i < len(proxies); i++ {
-		fmt.Println(proxies[i])
-	}
+	return 0
 }
 
-func listen(otto *pac.OttoEngine) {
+func listen(engine *pac.OttoEngine, o options, con *console) int {
+	ln, err := openListener(o.listen)
+	if err != nil {
+		con.errorf("%v", err)
+		return 1
+	}
+	if !isLoopbackListen(o.listen) {
+		con.warnf("%s is reachable from other machines: anyone who can connect can send traffic "+
+			"through your VPN and upstream proxies. Use -l 127.0.0.1:<port> unless you need this.", o.listen)
+	}
+	con.infof("%s %s listening on %s (PAC: %s)", Name, Version, ln.Addr(), describePACSource(o.pac))
+
 	srv := &http.Server{
-		Addr:              fListen,
 		ReadHeaderTimeout: 2 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		Handler: newProxyHTTPHandler(
-			otto,
+			engine,
 			&pac.FirstItemSelector{},
 			newNonProxyHTTPHandler(),
 		),
 	}
-	log.Printf("Listening on %q", fListen)
-	if err := srv.ListenAndServe(); err != nil {
-		log.Panic(err)
+	if err := srv.Serve(ln); err != nil {
+		con.errorf("server stopped: %v", err)
+		return 1
 	}
+	return 0
+}
+
+// openListener binds addr. A busy port is reported, never worked around:
+// silently moving to another port would leave Burp pointing at nothing.
+func openListener(addr string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err == nil {
+		return ln, nil
+	}
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return nil, fmt.Errorf("cannot listen on %s: port already in use "+
+			"(Burp, Charles, Fiddler or another pacchain?). Choose another port with -l", addr)
+	}
+	return nil, fmt.Errorf("cannot listen on %s: %v", addr, err)
+}
+
+// isLoopbackListen reports whether addr only accepts connections from this
+// machine. An empty host (":8888") means all interfaces.
+func isLoopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// describePACSource names the -c value for status lines without echoing
+// inline scripts or URL query strings (which may carry tokens).
+func describePACSource(s string) string {
+	if _, err := pac.ParseFindProxyString(s); err == nil {
+		return "inline result"
+	}
+	if strings.Contains(s, "FindProxyForURL") {
+		return "inline script"
+	}
+	if u, err := url.Parse(s); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+		return u.Scheme + "://" + u.Host + u.Path
+	}
+	return s
 }
