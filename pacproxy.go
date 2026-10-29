@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -86,12 +87,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	con := newConsole(stderr)
 	if o.verbose {
-		log.SetOutput(stderr)
+		log.SetOutput(logWriter{con})
 	} else {
 		log.SetOutput(io.Discard)
 	}
 	log.SetPrefix("")
-	log.SetFlags(log.Ldate | log.Lmicroseconds | log.Lshortfile | log.LUTC)
+	log.SetFlags(0) // the console adds the timestamp
 	log.Printf("Starting %s v%s", Name, Version)
 
 	engine := pac.NewOttoEngine(
@@ -141,14 +142,15 @@ func listen(engine *pac.OttoEngine, o options, con *console) int {
 	}
 	con.infof("%s %s listening on %s (PAC: %s)", Name, Version, ln.Addr(), describePACSource(o.pac))
 
+	handler := newProxyHTTPHandler(engine, &pac.FirstItemSelector{}, newNonProxyHTTPHandler())
+	handler.con = con
+	handler.verbose = o.verbose
+	handler.pacName = shortPACName(o.pac)
+
 	srv := &http.Server{
 		ReadHeaderTimeout: 2 * time.Second,
 		IdleTimeout:       60 * time.Second,
-		Handler: newProxyHTTPHandler(
-			engine,
-			&pac.FirstItemSelector{},
-			newNonProxyHTTPHandler(),
-		),
+		Handler:           handler,
 	}
 	if err := srv.Serve(ln); err != nil {
 		con.errorf("server stopped: %v", err)
@@ -183,6 +185,16 @@ func isLoopbackListen(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// shortPACName is the compact PAC label used on every connection line:
+// the file name for files ("env-a.pac"), otherwise the describePACSource text.
+func shortPACName(s string) string {
+	d := describePACSource(s)
+	if d == s {
+		return filepath.Base(s)
+	}
+	return d
 }
 
 // describePACSource names the -c value for status lines without echoing

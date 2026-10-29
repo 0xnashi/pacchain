@@ -1,7 +1,11 @@
 package pac
 
 import (
+	"bytes"
+	"log"
 	"net/url"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -131,4 +135,34 @@ func TestOttoWithFindProxyForURLFunctionThatReturnsMultipleValues(t *testing.T) 
 		[]Proxy{Proxy{"proxy.example.com", 8080}, DirectProxy},
 		"",
 	)
+}
+
+// -v must not print the PAC source: real PAC files list internal hostnames.
+func TestStartDoesNotLogPACSource(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	o := NewOttoEngine(OttoStringLoader(
+		`function FindProxyForURL(url, host) { if (host == "internal-secret.example.test") return "DIRECT"; return "DIRECT"; }`))
+	if err := o.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer o.Stop()
+	if strings.Contains(buf.String(), "internal-secret") {
+		t.Errorf("PAC source leaked into the log:\n%s", buf.String())
+	}
+}
+
+// Loading from a URL must not log its query string (it may carry a token).
+func TestHTTPLoaderDoesNotLogQueryString(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	u, _ := url.Parse("http://127.0.0.1:1/proxy.pac?token=SECRET123")
+	HTTPLoader(u)() // fails to connect; only the log line matters
+	if strings.Contains(buf.String(), "SECRET123") {
+		t.Errorf("query string leaked into the log:\n%s", buf.String())
+	}
 }

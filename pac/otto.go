@@ -304,7 +304,8 @@ func (o *OttoEngine) Start() error {
 		if pacError != nil {
 			return pacError
 		}
-		log.Print("PAC:\n" + pac + "\n")
+		// Never log the PAC source: real PAC files list internal hostnames.
+		log.Printf("PAC loaded (%d bytes)", len(pac))
 		_, pacError = vm.Run(pac)
 		if pacError != nil {
 			return pacError

@@ -44,7 +44,8 @@ func FileLoader(file string) Loader {
 
 func HTTPLoader(u *url.URL) Loader {
 	return func() (string, error) {
-		log.Printf("loading pac from URL %q", u)
+		// Log without query string or userinfo: either may carry a token.
+		log.Printf("loading pac from URL %q", u.Scheme+"://"+u.Host+u.Path)
 		res, err := http.Get(u.String())
 		if err != nil {
 			return "", err

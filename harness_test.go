@@ -4,11 +4,14 @@ package main
 // fake upstream proxies, all in-process on random localhost ports.
 
 import (
+	"bytes"
 	"crypto/tls"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +33,58 @@ func newPacchain(t *testing.T, pacSrc string) *httptest.Server {
 		engine.Stop()
 	})
 	return srv
+}
+
+// newLoggedPacchain is newPacchain with the connection log captured.
+func newLoggedPacchain(t *testing.T, pacSrc string, verbose bool) (*httptest.Server, *syncBuffer) {
+	t.Helper()
+	engine := pac.NewOttoEngine(pac.OttoStringLoader(pacSrc))
+	if err := engine.Start(); err != nil {
+		t.Fatalf("start PAC engine: %v", err)
+	}
+	logBuf := &syncBuffer{}
+	h := newProxyHTTPHandler(engine, &pac.FirstItemSelector{}, nil)
+	h.con = newConsole(logBuf)
+	h.verbose = verbose
+	h.pacName = "test.pac"
+	srv := httptest.NewServer(h)
+	t.Cleanup(func() {
+		srv.Close()
+		engine.Stop()
+	})
+	return srv, logBuf
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent writers and readers.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// waitForLog polls until the log contains want, or fails after 2 seconds.
+// Tunnel teardown is asynchronous, so some lines appear after the response.
+func waitForLog(t *testing.T, logBuf *syncBuffer, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(logBuf.String(), want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("log never contained %q; log:\n%s", want, logBuf.String())
 }
 
 // newFakeUpstream starts a fake upstream proxy on a random port.
