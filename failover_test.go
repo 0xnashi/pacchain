@@ -4,12 +4,13 @@ package main
 //
 //   - Try PAC options in order.
 //   - A proxy that cannot be used (unreachable, hangs up, no answer) → try next.
-//   - A proxy that answers with an error (407, 502, ...) → stop and report it;
-//     it works, and another proxy might route to a different environment.
+//   - A proxy that answers with an error (407, 502, ...) → stop, log it, and
+//     relay the proxy's own response to the client, marked with
+//     X-Pacchain-Upstream; another proxy might route to a different environment.
 //   - DIRECT after a failed proxy is blocked unless --allow-direct-fallback:
 //     with STG proxies, "DIRECT" for a production hostname reaches production.
-//   - pacchain replies 200 to the client only after the upstream said 200,
-//     and never passes an upstream's CONNECT error through unexplained.
+//   - pacchain replies 200 to the client only after the upstream said 200.
+//   - When no proxy answered at all, pacchain replies with its own 502.
 
 import (
 	"bufio"
@@ -29,9 +30,9 @@ func pacReturning(answer string) string {
 	return fmt.Sprintf(`function FindProxyForURL(url, host) { return %q; }`, answer)
 }
 
-// rawCONNECT sends a CONNECT through pacchain and returns the status line
-// and the response body (empty for a successful tunnel).
-func rawCONNECT(t *testing.T, chain *httptest.Server, target string) (status, body string) {
+// rawCONNECT sends a CONNECT through pacchain and returns the status line,
+// headers and response body (empty for a successful tunnel).
+func rawCONNECT(t *testing.T, chain *httptest.Server, target string) (status string, header http.Header, body string) {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", chain.Listener.Addr().String(), 2*time.Second)
 	if err != nil {
@@ -52,7 +53,7 @@ func rawCONNECT(t *testing.T, chain *httptest.Server, target string) (status, bo
 		sb.Write(buf[:n])
 		body = sb.String()
 	}
-	return resp.Status, body
+	return resp.Status, resp.Header, body
 }
 
 // directTarget is a TLS server reachable without any proxy; it counts hits
@@ -94,20 +95,25 @@ func TestFailoverWhenFirstProxyHangsUp(t *testing.T) {
 	}
 }
 
-// The core fix for blind relaying: an upstream's 407 used to be piped to the
-// client unexplained while pacchain logged nothing.
-func TestUpstreamRejectionIsReportedNotRelayed(t *testing.T) {
+// The core fix for blind relaying: pacchain reads the upstream's answer, logs
+// it, and relays it marked with its source. Previously the 407 was piped to
+// the client while pacchain itself knew and logged nothing.
+func TestUpstreamRejectionIsRelayedWithSource(t *testing.T) {
 	deny := newFakeUpstream(t, "deny", fakeupstream.ModeReject407)
 	chain, logBuf := newPacchainWith(t, pacReturning("PROXY "+deny.Addr()), nil)
 
-	status, body := rawCONNECT(t, chain, "x.deny.test:443")
-	if !strings.HasPrefix(status, "502") {
-		t.Fatalf("status %q, want 502 from pacchain (not the upstream's 407)", status)
+	status, header, body := rawCONNECT(t, chain, "x.deny.test:443")
+	if !strings.HasPrefix(status, "407") {
+		t.Fatalf("status %q, want the upstream's own 407", status)
 	}
-	for _, want := range []string{deny.Addr(), "407"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("502 body missing %q:\n%s", want, body)
-		}
+	if got := header.Get("X-Pacchain-Upstream"); got != "PROXY "+deny.Addr() {
+		t.Errorf("X-Pacchain-Upstream = %q, want %q", got, "PROXY "+deny.Addr())
+	}
+	if header.Get("Proxy-Authenticate") == "" {
+		t.Error("upstream's Proxy-Authenticate header was not relayed")
+	}
+	if !strings.Contains(body, "fakeupstream deny: proxy authentication required") {
+		t.Errorf("upstream's own error page was not relayed:\n%s", body)
 	}
 	waitForLog(t, logBuf, "[-] CONNECT x.deny.test:443 → PROXY "+deny.Addr()+" failed: answered 407")
 }
@@ -119,9 +125,12 @@ func TestNoFailoverWhenProxyAnswersWithError(t *testing.T) {
 			b := newFakeUpstream(t, "stg-b", fakeupstream.ModeOK)
 			chain, _ := newPacchainWith(t, pacReturning("PROXY "+first.Addr()+"; PROXY "+b.Addr()), nil)
 
-			status, _ := rawCONNECT(t, chain, "x.test:443")
-			if !strings.HasPrefix(status, "502") {
-				t.Errorf("status %q, want 502", status)
+			status, header, _ := rawCONNECT(t, chain, "x.test:443")
+			if !strings.HasPrefix(status, string(mode)) {
+				t.Errorf("status %q, want the first proxy's %s relayed", status, mode)
+			}
+			if got := header.Get("X-Pacchain-Upstream"); got != "PROXY "+first.Addr() {
+				t.Errorf("X-Pacchain-Upstream = %q", got)
 			}
 			if n := len(b.Connects()); n != 0 {
 				t.Errorf("failed over to stg-b after the first proxy answered %s", mode)
@@ -134,9 +143,12 @@ func TestAllOptionsFailedListsEveryAttempt(t *testing.T) {
 	dead1, dead2 := deadAddr(t), deadAddr(t)
 	chain, logBuf := newPacchainWith(t, pacReturning("PROXY "+dead1+"; PROXY "+dead2), nil)
 
-	status, body := rawCONNECT(t, chain, "x.down.test:443")
+	status, header, body := rawCONNECT(t, chain, "x.down.test:443")
 	if !strings.HasPrefix(status, "502") {
 		t.Fatalf("status %q, want 502", status)
+	}
+	if header.Get("X-Pacchain-Upstream") != "" {
+		t.Error("no upstream answered, so the 502 is pacchain's own and must not name one")
 	}
 	for _, want := range []string{dead1, dead2} {
 		if !strings.Contains(body, want) {
@@ -152,7 +164,7 @@ func TestDirectFallbackBlockedByDefault(t *testing.T) {
 	dead := deadAddr(t)
 	chain, logBuf := newPacchainWith(t, pacReturning("PROXY "+dead+"; DIRECT"), nil)
 
-	status, body := rawCONNECT(t, chain, target.Listener.Addr().String())
+	status, _, body := rawCONNECT(t, chain, target.Listener.Addr().String())
 	if !strings.HasPrefix(status, "502") {
 		t.Fatalf("status %q, want 502", status)
 	}
@@ -238,16 +250,19 @@ func TestHTTPDirectFallbackBlockedByDefault(t *testing.T) {
 	}
 }
 
-// 407 can only come from a proxy, so on the HTTP path it is reported like on
-// the CONNECT path instead of being handed to Burp as if from the target.
-func TestHTTPUpstream407IsReported(t *testing.T) {
+// On the HTTP path a 407 can only come from the proxy: it is logged as the
+// proxy's answer, relayed with its source marked, and not failed over.
+func TestHTTPUpstream407IsRelayedWithSource(t *testing.T) {
 	deny := newFakeUpstream(t, "deny", fakeupstream.ModeReject407)
 	b := newFakeUpstream(t, "stg-b", fakeupstream.ModeOK)
 	chain, logBuf := newPacchainWith(t, pacReturning("PROXY "+deny.Addr()+"; PROXY "+b.Addr()), nil)
 
 	resp, body := fetch(t, clientVia(t, chain), "http://web.deny.test/")
-	if resp.StatusCode != http.StatusBadGateway || !strings.Contains(body, "407") {
-		t.Fatalf("status %d, body %q", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusProxyAuthRequired || !strings.Contains(body, "fakeupstream deny") {
+		t.Fatalf("status %d, body %q; want the upstream's own 407", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("X-Pacchain-Upstream"); got != "PROXY "+deny.Addr() {
+		t.Errorf("X-Pacchain-Upstream = %q", got)
 	}
 	if len(b.Requests()) != 0 {
 		t.Error("failed over after a 407")

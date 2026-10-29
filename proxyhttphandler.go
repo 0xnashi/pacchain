@@ -163,7 +163,11 @@ func (h *proxyHTTPHandler) doConnectProxy(w http.ResponseWriter, r *http.Request
 		h.logFailure(f, "CONNECT", rt.target, p, err, detail)
 	}
 	if serverConn == nil {
-		http.Error(w, f.report(rt.target), http.StatusBadGateway)
+		if answer, from, ok := f.answer(); ok {
+			answer.relay(w, from) // the upstream's own refusal, source marked
+		} else {
+			http.Error(w, f.report(rt.target), http.StatusBadGateway)
+		}
 		return
 	}
 	defer serverConn.Close()
@@ -233,7 +237,10 @@ func (h *proxyHTTPHandler) doHTTPProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var resp *http.Response
+	var (
+		resp     *http.Response
+		answered bool // resp is a proxy's own 407: relay it, marked
+	)
 	f := newFailover(rt.options, h.allowDirectFallback)
 	for p, ok := f.next(); ok; p, ok = f.next() {
 		var err error
@@ -250,9 +257,12 @@ func (h *proxyHTTPHandler) doHTTPProxy(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				err = unwrapURLError(err)
 			} else if resp.StatusCode == http.StatusProxyAuthRequired && p != pac.DirectProxy {
-				// 407 only ever comes from a proxy: report it like on CONNECT.
-				resp.Body.Close()
-				resp, err = nil, &upstreamAnswerError{status: resp.Status}
+				// 407 only ever comes from a proxy: log it as the proxy's
+				// answer, don't fail over, relay it with its source marked.
+				f.failed(p, &upstreamAnswerError{status: resp.Status, code: resp.StatusCode})
+				h.logFailure(f, r.Method, rt.target, p, f.attempts[len(f.attempts)-1].err, detail)
+				answered = true
+				break
 			}
 		}
 		if err == nil {
@@ -270,16 +280,22 @@ func (h *proxyHTTPHandler) doHTTPProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	if f.fellBackToDirect(rt.proxy) {
+	switch {
+	case answered:
+		// already logged as the proxy's answer by logFailure
+	case f.fellBackToDirect(rt.proxy):
 		h.con.warnf("%s %s → DIRECT after a proxy failed: sent to the target directly, not through a proxy%s %d",
 			r.Method, rt.target, detail, resp.StatusCode)
-	} else {
+	default:
 		h.con.connf("%s %s → %s%s %d", r.Method, rt.target, rt.proxy, detail, resp.StatusCode)
 	}
 
 	wh := w.Header()
 	clearHeaders(wh)
 	copyHeaders(wh, resp.Header)
+	if answered {
+		wh.Set(upstreamHeader, rt.proxy.String())
+	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }

@@ -3,13 +3,17 @@ package main
 // Failover: try the PAC's options in order.
 //
 //	unusable proxy (unreachable, hangs up, no answer)  → try the next option
-//	proxy answers with an error (407, 502, ...)        → stop and report it
+//	proxy answers with an error (407, 502, ...)        → stop, log it, and relay
+//	                                                      the proxy's own response
 //	DIRECT after a proxy option failed                 → blocked unless
 //	                                                      --allow-direct-fallback
 //
 // A proxy that answers is working; failing over could route the request into
-// a different environment. DIRECT after a failed STG proxy sends a production
-// hostname straight to production, so it needs an explicit opt-in.
+// a different environment. Its response is relayed unchanged (it may explain
+// the refusal) with X-Pacchain-Upstream naming the proxy. DIRECT after a
+// failed STG proxy sends a production hostname straight to production, so it
+// needs an explicit opt-in. When no option answered at all, the client gets
+// pacchain's own 502 listing every attempt.
 
 import (
 	"bufio"
@@ -32,13 +36,54 @@ const (
 	// maxReplayBody is the largest HTTP request body buffered so it can be
 	// resent to the next option. Larger bodies are streamed, not retried.
 	maxReplayBody = 1 << 20
+	// maxRelayedErrorBody caps an upstream error page relayed to the client.
+	maxRelayedErrorBody = 64 << 10
+	// upstreamHeader names the proxy whose own response is being relayed.
+	upstreamHeader = "X-Pacchain-Upstream"
 )
 
 // upstreamAnswerError: the upstream proxy is up and refused the request.
-// pacchain never fails over on it.
-type upstreamAnswerError struct{ status string }
+// pacchain never fails over on it, and relays the response it carries.
+type upstreamAnswerError struct {
+	status string // e.g. "407 Proxy Authentication Required"
+	code   int
+	header http.Header
+	body   []byte
+}
 
 func (e *upstreamAnswerError) Error() string { return "answered " + e.status }
+
+// relay writes the upstream's own response to the client, marked with the
+// proxy it came from. Hop-by-hop and length headers are recomputed.
+func (e *upstreamAnswerError) relay(w http.ResponseWriter, from pac.Proxy) {
+	wh := w.Header()
+	for k, vs := range e.header {
+		switch http.CanonicalHeaderKey(k) {
+		case "Connection", "Keep-Alive", "Proxy-Connection", "Te", "Trailer",
+			"Transfer-Encoding", "Upgrade", "Content-Length":
+			continue
+		}
+		for _, v := range vs {
+			wh.Add(k, v)
+		}
+	}
+	wh.Set(upstreamHeader, from.String())
+	w.WriteHeader(e.code)
+	w.Write(e.body)
+}
+
+// answer returns the upstream response that ended the request, if any.
+func (f *failover) answer() (*upstreamAnswerError, pac.Proxy, bool) {
+	if len(f.attempts) == 0 {
+		return nil, pac.Proxy{}, false
+	}
+	last := f.attempts[len(f.attempts)-1]
+	var a *upstreamAnswerError
+	if errors.As(last.err, &a) {
+		return a, last.proxy, true
+	}
+	return nil, pac.Proxy{}, false
+}
 
 var errDirectFallbackBlocked = errors.New("DIRECT fallback blocked: a proxy option failed, " +
 	"and DIRECT for this host may reach production; start pacchain with --allow-direct-fallback to permit it")
@@ -167,8 +212,11 @@ func (h *proxyHTTPHandler) openTunnel(r *http.Request, p pac.Proxy) (net.Conn, i
 		return nil, nil, fmt.Errorf("closed the connection without answering CONNECT (%v)", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		conn.Close()
-		return nil, nil, &upstreamAnswerError{status: resp.Status}
+		defer conn.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxRelayedErrorBody))
+		return nil, nil, &upstreamAnswerError{
+			status: resp.Status, code: resp.StatusCode, header: resp.Header, body: body,
+		}
 	}
 	conn.SetDeadline(time.Time{}) // the tunnel itself has no deadline
 	return conn, br, nil
