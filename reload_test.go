@@ -78,7 +78,7 @@ func TestWatchPACIgnoresMissingFile(t *testing.T) {
 func TestIsPACFile(t *testing.T) {
 	tests := map[string]bool{
 		"examples/dev.pac":               true,
-		"/Users/me/pac/env-a.pac":          true,
+		"/Users/me/pac/env-a.pac":        true,
 		"https://pac.example.test/p.pac": false,
 		pac.DirectPAC:                    false,
 		"PROXY proxy.example.test:8080":  false,
