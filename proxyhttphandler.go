@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/0xnashi/pacchain/pac"
@@ -30,6 +31,8 @@ type proxyHTTPHandler struct {
 	// allowDirectFallback permits DIRECT after a proxy option failed
 	// (--allow-direct-fallback). Off by default: it can reach production.
 	allowDirectFallback bool
+
+	requests atomic.Int64 // requests received so far (idle reminder)
 
 	tunnelsMu sync.Mutex
 	tunnels   map[net.Conn]net.Conn // open CONNECT tunnels: client → server
@@ -87,6 +90,7 @@ func newProxyHTTPHandler(
 }
 
 func (h *proxyHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.requests.Add(1)
 	if strings.ToUpper(r.Method) == "CONNECT" {
 		h.doConnectProxy(w, r)
 	} else if r.URL.IsAbs() {

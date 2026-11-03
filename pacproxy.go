@@ -44,7 +44,15 @@ type options struct {
 	version    bool
 
 	allowDirectFallback bool
+
+	// idleWarnAfter: warn once if no request arrived by then (0 = default).
+	// Not a flag; tests shorten it.
+	idleWarnAfter time.Duration
 }
+
+// idleWarnAfterDefault is when pacchain says it has seen no traffic yet.
+// No traffic usually means Burp's upstream proxy setting is not in effect.
+const idleWarnAfterDefault = 30 * time.Second
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -141,11 +149,26 @@ func listen(engine *pac.OttoEngine, o options, con *console) int {
 		con.errorf("%v", err)
 		return 1
 	}
-	if !isLoopbackListen(o.listen) {
-		con.warnf("%s is reachable from other machines: anyone who can connect can send traffic "+
-			"through your VPN and upstream proxies. Use -l 127.0.0.1:<port> unless you need this.", o.listen)
+	srv, stop := setupServer(engine, o, con, ln)
+	defer stop()
+	if err := srv.Serve(ln); err != nil {
+		con.errorf("server stopped: %v", err)
+		return 1
 	}
-	con.infof("%s %s listening on %s (PAC: %s)", Name, Version, ln.Addr(), describePACSource(o.pac))
+	return 0
+}
+
+// setupServer does everything listen does except serving: startup messages,
+// the handler, PAC reloading (file watch, SIGHUP) and the idle reminder.
+// The returned function stops the background work.
+func setupServer(engine *pac.OttoEngine, o options, con *console, ln net.Listener) (*http.Server, func()) {
+	addr := ln.Addr().String()
+	if !isLoopbackListen(addr) {
+		con.warnf("%s is reachable from other machines: anyone who can connect can send traffic "+
+			"through your VPN and upstream proxies. Use -l 127.0.0.1:<port> unless you need this.", addr)
+	}
+	con.infof("%s %s listening on %s (PAC: %s)", Name, Version, addr, describePACSource(o.pac))
+	var stops []func()
 
 	handler := newProxyHTTPHandler(engine, newNonProxyHTTPHandler())
 	handler.con = con
@@ -156,23 +179,38 @@ func listen(engine *pac.OttoEngine, o options, con *console) int {
 	rl := &reloader{engine: engine, handler: handler, con: con, name: shortPACName(o.pac)}
 	initSignalNotify(rl.reload)
 	if isPACFile(o.pac) {
-		watchPAC(o.pac, pacWatchInterval, con, func() { rl.reload("file changed") })
+		stops = append(stops, watchPAC(o.pac, pacWatchInterval, con, func() { rl.reload("file changed") }))
+		con.infof("watching %s for changes: edit it or switch its symlink, no restart needed", o.pac)
 	}
 	if o.allowDirectFallback {
 		con.warnf("--allow-direct-fallback: if a proxy fails and the PAC lists DIRECT next, " +
 			"traffic goes straight to the target (for STG hostnames: production)")
 	}
 
+	idle := o.idleWarnAfter
+	if idle <= 0 {
+		idle = idleWarnAfterDefault
+	}
+	timer := time.AfterFunc(idle, func() {
+		if handler.requests.Load() == 0 {
+			con.warnf("no requests received in %s. If you are browsing through Burp, its upstream proxy "+
+				"is probably not in effect: Burp → Settings → Network → Connections → Upstream proxy servers "+
+				"needs Destination host * → %s (Burp's own listener stays 127.0.0.1:8080). "+
+				"Still nothing? Try a Temporary project with Burp defaults.", idle, addr)
+		}
+	})
+	stops = append(stops, func() { timer.Stop() })
+
 	srv := &http.Server{
 		ReadHeaderTimeout: 2 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		Handler:           handler,
 	}
-	if err := srv.Serve(ln); err != nil {
-		con.errorf("server stopped: %v", err)
-		return 1
+	return srv, func() {
+		for _, stop := range stops {
+			stop()
+		}
 	}
-	return 0
 }
 
 // openListener binds addr. A busy port is reported, never worked around:
