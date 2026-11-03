@@ -1,0 +1,67 @@
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Read-only token: this workflow only checks out and tests code.
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the run still in progress.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is the platform pacchain is used on; Linux is the cheap baseline.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod # the version go.mod requires, not "latest"
+
+      - name: No PAC files outside examples/
+        # Real PAC files list internal hostnames. The local pre-commit hook
+        # blocks them too, but only where `make hooks` was run.
+        run: |
+          found=$(git ls-files '*.pac' '*.dat' | grep -v '^examples/' || true)
+          if [ -n "$found" ]; then
+            echo "::error::PAC files outside examples/ are tracked:"
+            echo "$found"
+            exit 1
+          fi
+
+      - name: gofmt
+        run: |
+          # favicon.go is generated (make favicon) and kept as generated.
+          unformatted=$(gofmt -l . | grep -v '^favicon.go$' || true)
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: go test -race -count=1 ./...
+
+      - name: Cross-compile release targets
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          for p in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64; do
+            echo "build $p"
+            CGO_ENABLED=0 GOOS=${p%/*} GOARCH=${p#*/} go build -o /dev/null . || exit 1
+          done
