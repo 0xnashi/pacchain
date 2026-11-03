@@ -16,6 +16,8 @@ package fakeupstream
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -235,14 +237,22 @@ func (u *Upstream) tunnel(w http.ResponseWriter) {
 
 // servePage is the backend every request ends up at. It reports which
 // upstream served it, with a per-upstream background colour for browsers.
-// X-Fake-Body-Bytes reports the request body size so tests can check that a
-// retried request arrived intact.
+//
+// Test helpers in the response headers:
+//
+//	X-Fake-Body-Bytes       request body size (a retried request arrived intact?)
+//	X-Fake-Accept-Encoding  the Accept-Encoding this upstream received ("" if none)
+//
+// GzipPath answers with a gzip-compressed body and Content-Encoding: gzip,
+// whatever the client accepts, so tests can see whether a proxy in between
+// decompressed it.
 func (u *Upstream) servePage(w http.ResponseWriter, r *http.Request) {
 	n, _ := io.Copy(io.Discard, r.Body)
 	w.Header().Set("X-Fake-Upstream", u.name)
 	w.Header().Set("X-Fake-Body-Bytes", strconv.FormatInt(n, 10))
+	w.Header().Set("X-Fake-Accept-Encoding", r.Header.Get("Accept-Encoding"))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!doctype html>
+	page := fmt.Sprintf(`<!doctype html>
 <html><body style="font-family:monospace;background:hsl(%d,70%%,85%%);padding:2em">
 <h1>fake upstream: %s</h1>
 <p>host: %s<br>method: %s<br>path: %s</p>
@@ -252,6 +262,27 @@ func (u *Upstream) servePage(w http.ResponseWriter, r *http.Request) {
 		html.EscapeString(r.Host),
 		html.EscapeString(r.Method),
 		html.EscapeString(r.URL.Path))
+
+	if r.URL.Path == GzipPath {
+		body := GzipBytes([]byte(page))
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.Write(body)
+		return
+	}
+	io.WriteString(w, page)
+}
+
+// GzipPath is the path at which servePage answers with a gzip body.
+const GzipPath = "/gzip"
+
+// GzipBytes returns b gzip-compressed.
+func GzipBytes(b []byte) []byte {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	zw.Write(b)
+	zw.Close()
+	return buf.Bytes()
 }
 
 func (u *Upstream) log(format string, args ...any) {

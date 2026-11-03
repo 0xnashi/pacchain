@@ -56,8 +56,10 @@ func newProxyHTTPHandler(
 		KeepAlive: 10 * time.Second,
 	}
 	transport := &http.Transport{
-		DisableKeepAlives:     false,
-		DisableCompression:    false,
+		DisableKeepAlives: false,
+		// Never add "Accept-Encoding: gzip" or decompress responses: pacchain
+		// relays bytes as they are, so Burp sees what the server sent.
+		DisableCompression:    true,
 		MaxIdleConns:          50,
 		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       5 * time.Second,
@@ -390,9 +392,6 @@ func humanBytes(n int64) string {
 func removeProxyHeaders(r *http.Request) {
 	// this must be reset when serving a request with the client
 	r.RequestURI = ""
-	// If no Accept-Encoding header exists, Transport will add the headers it can accept
-	// and would wrap the response body with the relevant reader.
-	r.Header.Del("Accept-Encoding")
 	// curl can add that, see
 	// http://homepage.ntlworld.com/jonathan.deboynepollard/FGA/web-proxy-connection-header.html
 	r.Header.Del("Proxy-Connection")
