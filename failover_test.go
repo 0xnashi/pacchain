@@ -14,6 +14,8 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -275,18 +277,44 @@ func TestHTTPUpstream407IsRelayedWithSource(t *testing.T) {
 
 // An unreachable or unresolvable proxy usually means the VPN is down.
 func TestUnreachableProxyHintsVPN(t *testing.T) {
-	for name, proxy := range map[string]string{
-		"refused":      deadAddr(t),
-		"unresolvable": "proxy.nonexistent.invalid:8080",
-	} {
-		t.Run(name, func(t *testing.T) {
-			chain, logBuf := newPacchainWith(t, pacReturning("PROXY "+proxy), nil)
-			_, _, body := rawCONNECT(t, chain, "x.down.test:443")
-			if !strings.Contains(body, "VPN") {
-				t.Errorf("502 body has no VPN hint:\n%s", body)
-			}
-			waitForLog(t, logBuf, "VPN")
-		})
+	t.Run("refused", func(t *testing.T) {
+		chain, logBuf := newPacchainWith(t, pacReturning("PROXY "+deadAddr(t)), nil)
+		assertVPNHint(t, chain, logBuf)
+	})
+
+	// The lookup goes to a resolver that fails at once, the way a name only
+	// the VPN's DNS knows fails off the VPN. Real DNS is not used: how long an
+	// unknown name takes to fail depends on the machine's network (seconds on
+	// some Macs), which made this test time out.
+	t.Run("unresolvable", func(t *testing.T) {
+		var lookups atomic.Int64
+		chain, logBuf := newPacchainWith(t, pacReturning("PROXY proxy.nonexistent.invalid:8080"),
+			func(h *proxyHTTPHandler) { h.dialer.Resolver = failingResolver(&lookups) })
+		assertVPNHint(t, chain, logBuf)
+		if lookups.Load() == 0 {
+			t.Error("the test resolver was not used; the test depends on real DNS")
+		}
+	})
+}
+
+func assertVPNHint(t *testing.T, chain *httptest.Server, logBuf *syncBuffer) {
+	t.Helper()
+	_, _, body := rawCONNECT(t, chain, "x.down.test:443")
+	if !strings.Contains(body, "VPN") {
+		t.Errorf("502 body has no VPN hint:\n%s", body)
+	}
+	waitForLog(t, logBuf, "VPN")
+}
+
+// failingResolver answers every DNS query with an immediate error, without
+// touching the network, and counts the queries.
+func failingResolver(lookups *atomic.Int64) *net.Resolver {
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			lookups.Add(1)
+			return nil, errors.New("test resolver: no DNS")
+		},
 	}
 }
 
