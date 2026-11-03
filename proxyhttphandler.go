@@ -101,7 +101,11 @@ func (h *proxyHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // decide runs the PAC for r. An empty PAC answer means DIRECT.
 func (h *proxyHTTPHandler) decide(r *http.Request) (route, error) {
 	start := time.Now()
-	proxies, err := h.proxyFinder.FindProxyForURL(r.URL)
+	pacURL := browserPACURL(r.URL)
+	if r.Method == http.MethodConnect {
+		pacURL = connectPACURL(r.Host)
+	}
+	proxies, err := h.proxyFinder.FindProxyForURL(pacURL)
 	rt := route{target: logTarget(r), took: time.Since(start)}
 	if err != nil {
 		return rt, err

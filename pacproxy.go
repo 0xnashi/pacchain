@@ -122,7 +122,9 @@ func resolve(engine *pac.OttoEngine, rawURL string, stdout io.Writer, con *conso
 		con.errorf("-r needs a full URL such as https://%s/", strings.TrimPrefix(rawURL, "//"))
 		return 2
 	}
-	proxies, err := engine.FindProxyForURL(u)
+	// Evaluate the URL as pacchain will see it in real traffic: for HTTPS
+	// that is only scheme and host (the path never reaches it over CONNECT).
+	proxies, err := engine.FindProxyForURL(browserPACURL(u))
 	if err != nil {
 		con.errorf("PAC evaluation failed for %s: %v", u.Host, err)
 		return 1
