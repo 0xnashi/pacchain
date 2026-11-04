@@ -23,7 +23,7 @@ const Name = "pacchain"
 
 // Version of the app. Release builds may override it with
 // -ldflags "-X main.Version=x.y.z".
-var Version = "1.0.0"
+var Version = "1.1.0-dev"
 
 // About the app
 const About = "A PAC-aware chain proxy for routing Burp Suite traffic through PAC-selected upstream proxies"
