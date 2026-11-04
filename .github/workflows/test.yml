@@ -23,7 +23,9 @@ jobs:
         # macOS is the platform pacchain is used on; Linux is the cheap baseline.
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # Free macOS runners can take a while to become available; runs that
+    # waited past 15 minutes were cancelled before a single step ran.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
