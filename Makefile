@@ -2,9 +2,13 @@ NAME      := pacchain
 VERSION   := $(shell awk -F\" '/^var Version/ { print $$2 }' ./pacproxy.go)
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64
 
-.PHONY: all build test devenv hooks release clean favicon
+.PHONY: all build test devenv hooks release clean favicon version
 
 all: test build
+
+# Print the version from pacproxy.go (used by the release workflow).
+version:
+	@echo $(VERSION)
 
 # Local build for this machine.
 build:

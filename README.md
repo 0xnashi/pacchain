@@ -36,9 +36,10 @@ source with Go 1.25+:
 go install github.com/0xnashi/pacchain@latest
 ```
 
-On macOS, clear the quarantine flag of a downloaded binary:
+On macOS, extract it and clear the quarantine flag:
 
 ```bash
+tar -xzf pacchain_1.0.0_darwin_arm64.tar.gz
 xattr -d com.apple.quarantine ./pacchain
 ```
 
@@ -77,7 +78,7 @@ pacchain -c env-a.pac
 ```
 
 ```
-10:02:11 [*] pacchain 0.1.0 listening on 127.0.0.1:8888 (PAC: env-a.pac)
+10:02:11 [*] pacchain 1.0.0 listening on 127.0.0.1:8888 (PAC: env-a.pac)
 10:02:11 [*] watching env-a.pac for changes: edit it or switch its symlink, no restart needed
 10:02:15 [+] CONNECT app.stg.test:443 → PROXY proxy-b.example.test:8080 (env-a.pac, 0.2ms)
 10:02:16 [+] GET http://web.stg.test/page → DIRECT (env-a.pac, 0.1ms) 200
