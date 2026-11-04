@@ -1,7 +1,7 @@
 package main
 
 // Reloading the PAC while pacchain runs: by editing/replacing the PAC file
-// (watched once a second) or with `kill -HUP <pid>`.
+// (checked twice a second) or with `kill -HUP <pid>`.
 //
 // A reload builds and checks the new PAC first; if it is broken the previous
 // PAC stays in service. After a successful reload every open CONNECT tunnel
@@ -20,7 +20,7 @@ import (
 )
 
 // pacWatchInterval is how often the PAC file is checked for changes.
-const pacWatchInterval = time.Second
+const pacWatchInterval = 500 * time.Millisecond
 
 type reloader struct {
 	engine  pac.EngineManager
@@ -52,7 +52,8 @@ func (rl *reloader) reload(reason string) {
 // The starting content is read before watchPAC returns, so a change made
 // right after it returns is never mistaken for the starting state.
 func watchPAC(path string, interval time.Duration, con *console, onChange func()) (stop func()) {
-	last, _ := fileHash(path)
+	initial, _ := fileHash(path)
+	detector := newChangeDetector(initial)
 	done := make(chan struct{})
 	go func() {
 		unreadable := false
@@ -73,14 +74,37 @@ func watchPAC(path string, interval time.Duration, con *console, onChange func()
 				continue
 			}
 			unreadable = false
-			if h != last {
-				last = h
+			if detector.observe(h) {
 				onChange()
 			}
 		}
 	}()
 	var once sync.Once
 	return func() { once.Do(func() { close(done) }) }
+}
+
+// changeDetector decides when a watched file really changed. Saving often
+// truncates the file before writing it, so a single check can catch it empty
+// or half written. A change counts only once the content is the same on two
+// checks in a row, and only if it differs from what was last reported.
+type changeDetector struct {
+	loaded  [sha256.Size]byte // content last reported as a change (or the start)
+	pending [sha256.Size]byte // content seen on the previous check
+}
+
+func newChangeDetector(initial [sha256.Size]byte) *changeDetector {
+	return &changeDetector{loaded: initial, pending: initial}
+}
+
+// observe records one check and reports whether it completes a change.
+func (d *changeDetector) observe(h [sha256.Size]byte) bool {
+	stable := h == d.pending
+	d.pending = h
+	if !stable || h == d.loaded {
+		return false
+	}
+	d.loaded = h
+	return true
 }
 
 func fileHash(path string) ([sha256.Size]byte, error) {

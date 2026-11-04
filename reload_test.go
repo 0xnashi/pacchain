@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"fmt"
 	"net"
 	"net/http"
@@ -52,6 +53,37 @@ func TestWatchPACDetectsChanges(t *testing.T) {
 	os.WriteFile(path, []byte("three"), 0o600)
 	time.Sleep(100 * time.Millisecond)
 	waitChanges(2)
+}
+
+// Saves often truncate the file before writing it, so one check can see an
+// empty or partial file. Only content that stays the same for two checks
+// counts, and only if it differs from what was last loaded.
+func TestChangeDetector(t *testing.T) {
+	h := func(s string) [32]byte { return sha256.Sum256([]byte(s)) }
+	tests := []struct {
+		name string
+		seen []string
+		want []bool
+	}{
+		{"real change fires once it is stable",
+			[]string{"two", "two", "two"}, []bool{false, true, false}},
+		{"same content rewritten via a truncate is not a change",
+			[]string{"", "one", "one"}, []bool{false, false, false}},
+		{"partial write then the full new content fires once",
+			[]string{"tw", "two", "two"}, []bool{false, false, true}},
+		{"change and change back before it settled is nothing",
+			[]string{"two", "one", "one"}, []bool{false, false, false}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newChangeDetector(h("one"))
+			for i, s := range tt.seen {
+				if got := d.observe(h(s)); got != tt.want[i] {
+					t.Fatalf("observe #%d (%q) = %v, want %v", i, s, got, tt.want[i])
+				}
+			}
+		})
+	}
 }
 
 // A missing file (e.g. mid-save) never triggers a reload of nothing.
